@@ -1,0 +1,66 @@
+# 数据处理与科学计算
+numpy
+pandas
+scipy
+scikit-learn
+scikit-image
+statsmodels
+xarray
+astropy
+sympy
+networkx
+h5py
+numba
+dask
+distributed
+SimpleITK
+
+# 深度学习与 AI
+torch
+torchvision
+timm
+huggingface-hub
+safetensors
+einops
+opencv-python
+monai
+
+# 数据可视化与交互式应用
+matplotlib
+seaborn
+plotly
+bokeh
+altair
+holoviews
+hvplot
+datashader
+panel
+streamlit
+
+# 网页开发、爬虫与 API
+flask
+requests
+httpx
+aiohttp
+beautifulsoup4
+scrapy
+
+# 办公与辅助工具
+openpyxl
+xlwings
+sqlalchemy
+pydantic
+tqdm
+joblib
+s3fs
+nltk
+
+# 开发环境与调试 (IDE/Jupyter)
+jupyter
+notebook
+spyder
+ipython
+black
+pylint
+flake8
+pytest

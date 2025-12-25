@@ -1,0 +1,21 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+Dataset/
+results/
+*.pth
+*.npz
+
+# Trained models and logs
+trained_models/
+*.ckpt
+tensorboard_logs/
+*.tfevents*
+
+# IDEs
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db

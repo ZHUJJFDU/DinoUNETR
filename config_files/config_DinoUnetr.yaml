@@ -1,0 +1,41 @@
+
+
+loader_params: 
+
+    'train_bs': 64
+    'val_bs': 64
+    'csv_root': 'meta_files\meta_data_train_NaH.csv'
+    'csv_HaN_OAR_priority_root': 'meta_files/HaN_OAR_update.csv'
+    'csv_LUNG_OAR_priority_root': 'meta_files/LUNG_OAR_update.csv'
+    'scale_dose_dict': 'meta_files/PTV_DICT.json'
+    'pat_obj_dict': 'meta_files/Pat_Obj_DICT.json'
+    'num_workers': 16
+    'down_HU': -1000
+    'up_HU': 1000
+    'denom_norm_HU': 500
+
+    'in_size': [96, 256, 256]
+    'out_size': [96, 256, 256]
+    'CatStructures': False
+
+    'dose_div_factor': 10 
+    
+    
+model_params:
+    num_input_channels: 6
+    out_channels: 1
+    
+strategy: 'frozen' # Options: lora, llrd, frozen, default
+layout: True # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
+
+lr: 0.0001
+
+num_epochs: 200
+
+act_sig: True
+
+scale_out: 7.5
+
+scale_loss: 4
+
+save_model_root: trained_models/trained_model_frozen_full_256

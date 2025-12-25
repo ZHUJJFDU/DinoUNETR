@@ -1,0 +1,43 @@
+
+
+loader_params: 
+
+    'train_bs': 1
+    'val_bs': 1
+    'csv_root': 'meta_files/meta_data.csv'
+    'csv_HaN_OAR_priority_root': 'meta_files/HaN_OAR_update.csv'
+    'csv_LUNG_OAR_priority_root': 'meta_files/LUNG_OAR_update.csv'
+    'scale_dose_dict': 'meta_files/PTV_DICT.json'
+    'pat_obj_dict': 'meta_files/Pat_Obj_DICT.json'
+    'num_workers': 0
+
+    'down_HU': -1000
+    'up_HU': 1000
+    'denom_norm_HU': 500
+
+    'in_size': [96, 256, 256]
+    'out_size': [96, 256, 256]
+
+    'CatStructures': False
+    'dose_div_factor': 10 
+    
+    
+model_params:
+    num_input_channels: 6
+    out_channels: 1
+
+lr: 0.0001
+num_epochs: 120
+
+act_sig: False
+scale_out: 7.5
+
+# model_from_lightning: True
+# save_model_path: ../pretrainmodel/GDP-HMM_Challenge/lightning/best-train_loss=0.1841.ckpt
+# save_pred_path: 'results/lightning'
+
+
+model_from_lightning: True
+#save_model_path: ./trained_model/top_valid_model_1.pth
+save_model_path: trained_models\trained_model_lora_full_256_meddino\best_model-epoch=147-train_loss=0.0533.ckpt
+save_pred_path: 'results\result_lora_full_256_meddino'
