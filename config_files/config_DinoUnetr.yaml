@@ -22,11 +22,12 @@ loader_params:
     
     
 model_params:
-    num_input_channels: 6
+    input_channels: 6
     out_channels: 1
     
-strategy: 'frozen' # Options: lora, llrd, frozen, default
-layout: True # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
+strategy: 'default' # Options: lora, llrd, frozen, default
+layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
+use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
 
 lr: 0.0001
 
@@ -38,4 +39,4 @@ scale_out: 7.5
 
 scale_loss: 4
 
-save_model_root: trained_models/trained_model_frozen_full_256
+save_model_root: trained_models/trained_model_lora_full_256_layout_meddino

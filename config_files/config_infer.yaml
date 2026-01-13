@@ -4,7 +4,7 @@ loader_params:
 
     'train_bs': 1
     'val_bs': 1
-    'csv_root': 'meta_files/meta_data.csv'
+    'csv_root': 'meta_files/meta_data_train_NaH.csv'
     'csv_HaN_OAR_priority_root': 'meta_files/HaN_OAR_update.csv'
     'csv_LUNG_OAR_priority_root': 'meta_files/LUNG_OAR_update.csv'
     'scale_dose_dict': 'meta_files/PTV_DICT.json'
@@ -21,9 +21,11 @@ loader_params:
     'CatStructures': False
     'dose_div_factor': 10 
     
-    
+strategy: 'default' # Options: lora, llrd, frozen, default
+layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
+
 model_params:
-    num_input_channels: 6
+    input_channels: 6
     out_channels: 1
 
 lr: 0.0001
@@ -39,5 +41,5 @@ scale_out: 7.5
 
 model_from_lightning: True
 #save_model_path: ./trained_model/top_valid_model_1.pth
-save_model_path: trained_models\trained_model_lora_full_256_meddino\best_model-epoch=147-train_loss=0.0533.ckpt
-save_pred_path: 'results\result_lora_full_256_meddino'
+save_model_path: C:\Users\960\Desktop\DinoUNETR\trained_models\trained_model_default_full_256_meddino_changechannel\best_model-epoch=148-train_loss=0.0380.ckpt
+save_pred_path: results\result_default_full_256_meddino_changechannel

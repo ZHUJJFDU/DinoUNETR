@@ -346,11 +346,7 @@ class MED_DINO_UNETR(nn.Module):
     
     def forward(self, x, data):
         features = self.backbone(x)
-        f0 = x
-        f3 = features[0].detach() 
-        f6 = features[1].detach()
-        f9 = features[2].detach()
-        f12 = features[3].detach()
+        f0, f3, f6, f9, f12 = x, features[0], features[1], features[2], features[3] # 1,768,16,16
         
         layout_tokens = self.layout_embedder(data)
 

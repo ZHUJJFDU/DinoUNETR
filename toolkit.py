@@ -564,7 +564,7 @@ def compute_pca_projection(feature_map, n_components=3):
         rgb_img: Tensor, shape [3, H, W], 值域 [0, 1]
     """
     # 强制禁用混合精度，确保 PCA/SVD 在 FP32 下运行
-    with torch.cuda.amp.autocast(enabled=False):
+    with torch.amp.autocast('cuda', enabled=False):
         # 强制转换为 float32
         feature_map = feature_map.float()
 

@@ -13,6 +13,7 @@ import data_loader_lightning_slice
 from dino_unetr.DINO_UNETR import DINO_UNETR
 from dino_unetr.MED_DINO_UNETR import MED_DINO_UNETR as MED_DINO_UNETR_Basic
 from dino_unetr.MED_DINO_UNETR_layout import MED_DINO_UNETR as MED_DINO_UNETR_Layout
+from dino_unetr.MED_DINO_UNETR_nmODE import MED_DINO_UNETR as MED_DINO_UNETR_nmODE
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
 from dino_unetr.tuning_utils import inject_lora, get_llrd_params
 from toolkit import compute_pca_projection
@@ -27,16 +28,22 @@ class GDPLightningModel(pl.LightningModule):
             self.strategy = cfig['strategy']
         else:
             self.strategy = strategy
-            
+        
         # Determine Model Layout
         self.use_layout = cfig.get('layout', False)
+        self.use_nmODE = cfig.get('use_nmODE', False)
         
+        input_dim = cfig.get('model_params').get('input_channels')
+
         if self.use_layout:
-            print(">>> Using MED_DINO_UNETR_Layout")
-            self.model = MED_DINO_UNETR_Layout(checkpoint_path='dino_unetr\model.pth')
+            print(f">>> Using MED_DINO_UNETR_Layout (Input Dim: {input_dim})")
+            self.model = MED_DINO_UNETR_Layout(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
+        elif self.use_nmODE:
+            print(f">>> Using MED_DINO_UNETR_nmODE (Input Dim: {input_dim})")
+            self.model = MED_DINO_UNETR_nmODE(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
         else:
-            print(">>> Using MED_DINO_UNETR_Basic")
-            self.model = MED_DINO_UNETR_Basic(checkpoint_path='dino_unetr\model.pth')
+            print(f">>> Using MED_DINO_UNETR_Basic (Input Dim: {input_dim})")
+            self.model = MED_DINO_UNETR_Basic(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
             
         self.lr = float(cfig['lr'])
         self.num_epochs = cfig['num_epochs']
@@ -130,10 +137,23 @@ class GDPLightningModel(pl.LightningModule):
         oar_serial_mask = batch['oar_serial']
         oar_parallel_mask = batch['oar_parallel']
 
-        outputs, shallow_feat, deep_feat = self.model(inputs_2d)
+        if self.use_layout:
+            layout_data = {
+                'spacing': batch['spacing'],
+                'isocenter': batch['isocenter'],
+                'angle_list': batch['angle_list']
+            }
+            outputs, shallow_feat, deep_feat = self.model(inputs_2d, layout_data)
+        else:
+            outputs, shallow_feat, deep_feat = self.model(inputs_2d)
         
         pd_dose = (outputs * self.cfig['scale_out'])
         gt_dose = labels_2d
+
+        # Apply Body Mask to Loss Inputs
+        body_mask = batch['body']
+        pd_dose = pd_dose * body_mask
+        gt_dose = gt_dose * body_mask
 
         # loss, dvh_loss, mae_loss = L1_DVH_Loss(
         #     pd_dose, 
@@ -227,7 +247,7 @@ if __name__ == "__main__":
     # Data Loaders
     loaders = data_loader_lightning_slice.GetLoader(cfig=cfig['loader_params'])
     train_loader = loaders.train_dataloader()
-    val_loader = loaders.val_dataloader()
+    val_loader = loaders.test_dataloader()
 
     # Model
     model = GDPLightningModel(cfig) 

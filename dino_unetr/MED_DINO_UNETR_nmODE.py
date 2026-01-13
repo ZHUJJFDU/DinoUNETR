@@ -160,6 +160,47 @@ class Deconv2DBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+class nmODEBlock(nn.Module):
+    def __init__(self, in_channels, steps=2, dt=0.1):
+        """
+        Args:
+            in_channels: 输入特征图的通道数
+            steps: ODE 求解器的迭代步数 (论文中 T 的概念)
+            dt: 时间步长
+        """
+        super().__init__()
+        self.steps = steps
+        self.dt = dt
+        
+        # 对应论文公式中的 F(x)
+        # 用于提取外部驱动力的特征
+        self.conv_f = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        
+        # 既然是回归任务，可以在 F(x) 后加一个 Normalization 保持分布稳定
+        self.norm = nn.GroupNorm(min(4, in_channels), in_channels) 
+
+    def forward(self, x):
+        # x: 来自解码器的特征图 (外部输入)
+        
+        # 计算驱动力 F(x)
+        drive = self.norm(self.conv_f(x))
+        
+        # 初始化状态 y(0)。
+        # 论文中 y 是独立状态，但在实践中，将输入 x 作为初始猜测 y(0) 
+        # 通常能让模型收敛得更快（类似于 ResNet 的思想）。
+        y = x.clone()
+        
+        # 欧拉法求解微分方程 (Euler Method)
+        for _ in range(self.steps):
+            # 论文公式 (1): dy/dt = -y + sin^2(y + F(x))
+            # torch.sin()**2 即为 sin^2
+            derivative = -y + torch.sin(y + drive)**2
+            
+            # 更新状态: y(t+1) = y(t) + dy/dt * dt
+            y = y + derivative * self.dt
+            
+        return y
+
 # --- Main Model ---
 class MED_DINO_UNETR(nn.Module):
     def __init__(self, checkpoint_path, embed_dim=768, input_dim=6, output_dim=1):
@@ -204,14 +245,21 @@ class MED_DINO_UNETR(nn.Module):
         )
 
         self.head = nn.Sequential(
-            nn.Conv2d(128, 32, kernel_size=3, padding=1), # 128 -> 32
+            nn.Conv2d(128, 32, kernel_size=3, padding=1), 
             nn.GroupNorm(8, 32),
             nn.LeakyReLU(0.1, inplace=False),
+            
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.1, inplace=False),
+            
+            # [新增] 插入 nmODE 模块
+            # 在 16 通道上进行非线性动力学修正
+            nmODEBlock(in_channels=16, steps=3), 
+            
+            # 最终输出层 (16 -> output_dim)
             nn.Conv2d(16, output_dim, kernel_size=1),
-            nn.Softplus()
+            nn.Softplus() # 保持 Softplus 因为剂量必须 > 0
         )
     
     def forward(self, x):
@@ -241,7 +289,7 @@ if __name__ == '__main__':
     
     # Test Forward Pass
     print("\nTesting forward pass...")
-    input_tensor = torch.randn(1, 6, 512, 512)
+    input_tensor = torch.randn(1, 6, 256, 256)
     try:
         output_tensor,_,_ = model(input_tensor)
         print(f"Input shape: {input_tensor.shape}")

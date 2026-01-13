@@ -168,7 +168,7 @@ class CreateDataset():
             angle_list = In_dict['angle_list']
             In_dict['ed'] = HU2electron_density(In_dict['img']) * In_dict['Body'] 
             In_dict['md'] = HU2mass_density(In_dict['img']) * In_dict['Body'] 
-            In_dict['img'] = np.clip(In_dict['img'], self.cfig['down_HU'], self.cfig['up_HU']) / self.cfig['denom_norm_HU'] 
+            In_dict['img'] = np.clip(In_dict['img'], self.cfig['down_HU'], self.cfig['up_HU']) / self.cfig['denom_norm_HU'] * In_dict['Body'] 
 
             if 'dose' in In_dict.keys():
                 ptv_highdose =  self.scale_dose_Dict[PatientID]['PTV_High']['PDose'] # 高剂量PTV的值
@@ -234,7 +234,7 @@ class CreateDataset():
             save_data_dict['prompt'] = [In_dict['isVMAT'], len(prs_opt), self.site_list[index], self.cohort_list[index]]
             save_data_dict['comb_optptv'] = np.squeeze(comb_optptv.to('cpu').numpy())
             save_data_dict['comb_oar_priority'] = np.squeeze(comb_oar_priority.to('cpu').numpy())
-
+            save_data_dict['img'] = np.squeeze(In_dict['img'].to('cpu').numpy())
             distance_map = calculate_min_distance_to_tumor_surface(save_data_dict['comb_optptv'], In_dict['spacing']) ##mm
             save_data_dict['comb_oar_distance'] = calculate_distance_to_tumor(In_dict, distance_map, need_list, OAR_PRIORITY)
 

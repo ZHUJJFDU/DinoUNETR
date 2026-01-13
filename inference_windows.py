@@ -7,46 +7,105 @@ import numpy as np
 import math
 from pathlib import Path
 import matplotlib.pyplot as plt
-from datetime import datetime
 from train_lightning import GDPLightningModel
+
+def sliding_window_inference(model, input_tensor, layout_data=None, window_size=256, stride=128, device='cuda'):
+    """
+    Sliding window inference for 2D slices.
+    input_tensor: (1, C, H, W)
+    """
+    model.eval()
+    B, C, H, W = input_tensor.shape
+    
+    # Grid generation
+    h_steps = list(range(0, H - window_size + 1, stride))
+    if H > window_size and h_steps[-1] + window_size < H:
+        h_steps.append(H - window_size)
+        
+    w_steps = list(range(0, W - window_size + 1, stride))
+    if W > window_size and w_steps[-1] + window_size < W:
+        w_steps.append(W - window_size)
+        
+    # Initialize lazily
+    output_tensor = None
+    count_tensor = None
+    
+    for h in h_steps:
+        for w in w_steps:
+            patch = input_tensor[:, :, h:h+window_size, w:w+window_size]
+            
+            with torch.no_grad():
+                if layout_data is not None:
+                    pred_tuple = model(patch, layout_data)
+                else:
+                    pred_tuple = model(patch)
+                
+                # Handle tuple output (output, shallow, deep)
+                if isinstance(pred_tuple, tuple):
+                    pred_patch = pred_tuple[0]
+                else:
+                    pred_patch = pred_tuple
+            
+            if output_tensor is None:
+                B_out, C_out, _, _ = pred_patch.shape
+                output_tensor = torch.zeros((B_out, C_out, H, W), device=device)
+                count_tensor = torch.zeros((B_out, C_out, H, W), device=device)
+            
+            output_tensor[:, :, h:h+window_size, w:w+window_size] += pred_patch
+            count_tensor[:, :, h:h+window_size, w:w+window_size] += 1.0
+            
+    if count_tensor is None: 
+         return torch.zeros((B, 1, H, W), device=device)
+
+    return output_tensor / count_tensor
 
 if __name__ == "__main__": 
 
-    parser = argparse.ArgumentParser(description='Inference for 3D Model (Slice-by-Slice)')
+    parser = argparse.ArgumentParser(description='Inference for 3D Model (Sliding Window)')
     cfig_path = 'config_files/config_infer.yaml'
     parser.add_argument('--visualize', default='on', type=str, choices=['on','off'])
+    parser.add_argument('--strategy', default='lora', type=str, choices=['default', 'lora', 'llrd', 'frozen'], help='Model strategy used during training')
+    parser.add_argument('--window_size', default=256, type=int, help='Sliding window size')
+    parser.add_argument('--stride', default=128, type=int, help='Sliding window stride')
+    parser.add_argument('--model_path', default='trained_models/trained_model_lora_full_256_crop_meddino/best_model-epoch=69-train_loss=0.0738.ckpt', type=str, help='Override model path')
+    
     args = parser.parse_args()
 
     cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
+    
+    # Overwrite strategy from args to ensure model is initialized correctly
+    cfig['strategy'] = args.strategy
+
+    if args.model_path:
+        cfig['save_model_path'] = args.model_path
+        
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Force Resize to 512x512 for input to sliding window
+    cfig['loader_params']['in_size'] = [96, 512, 512]
+    cfig['loader_params']['out_size'] = [96, 512, 512]
+    
     # ------------ data loader (3D) -----------------#
     loaders = data_loader_lightning.GetLoader(cfig = cfig['loader_params'])
     test_loader = loaders.val_dataloader()
 
     # Determine Model Layout
     use_layout = cfig.get('layout', False)
-    strategy = cfig.get('strategy', 'default')
     
     pl_module = GDPLightningModel.load_from_checkpoint(
         cfig['save_model_path'], 
         cfig=cfig, 
-        strategy=strategy,
-        strict=True # 保持 strict=True，确保所有权重都正确加载
+        strategy=args.strategy, 
+        strict=True 
     )
     model = pl_module.model.to(device)
 
-    save_pred_path = cfig.get('save_pred_path', 'results')
+    save_pred_path = cfig.get('save_pred_path', 'results_window')
     if not os.path.exists(save_pred_path):
         os.makedirs(save_pred_path)
     
-    # Initialize Global Metrics Log (Overwrite old file)
-    global_metrics_path = Path(save_pred_path) / "global_metrics.txt"
-    with open(global_metrics_path, 'w', encoding='utf-8') as f:
-        f.write(f"Inference Log - Started at {datetime.now()}\n")
-        f.write("="*80 + "\n")
-    
-    print(f"Starting inference on device: {device}")
+    print(f"Starting sliding window inference on device: {device}")
+    print(f"Window Size: {args.window_size}, Stride: {args.stride}")
 
     # Global metrics accumulators
     total_l1 = []
@@ -74,16 +133,10 @@ if __name__ == "__main__":
                 # Prepare layout data for this patient if needed
                 layout_data_slice = None
                 if use_layout:
-                    # spacing: (B, 3) -> take b-th -> (3,) -> unsqueeze -> (1, 3)
-                    spacing_b = batch['spacing'][b].unsqueeze(0).to(device).float()
-                    # isocenter: (B, 3) -> take b-th -> (3,) -> unsqueeze -> (1, 3)
-                    # Note: data_loader_lightning.py uses 'ori_isocenter'
-                    isocenter_b = batch['ori_isocenter'][b].unsqueeze(0).to(device).float()
-                    
-                    # angle_list: batch['angle_list'] is likely a list of tensors (one per angle index)
+                    spacing_b = batch['spacing'][b].unsqueeze(0).to(device)
+                    isocenter_b = batch['ori_isocenter'][b].unsqueeze(0).to(device)
                     raw_angle_list = batch['angle_list']
                     patient_angles = [raw_angle_list[i][b].item() for i in range(len(raw_angle_list))]
-                    # Model expects List[List], where outer list is batch (size 1 here)
                     angle_list_b = [patient_angles]
                     
                     layout_data_slice = {
@@ -92,38 +145,29 @@ if __name__ == "__main__":
                         'angle_list': angle_list_b
                     }
 
-                # Updated indices for New 6-channel order:
-                # [0:MassDensity, 1:PTV, 2:OAR_Priority, 3:Beam, 4:OAR_Dist, 5:Body]
-                vol_ptv_dose = vol_input[1]
-                vol_oar_priority = vol_input[2]
-                vol_beam_plate_norm = vol_input[3]
-                # vol_ct = vol_input[0] 
+                vol_ptv_dose = vol_input[0]
+                vol_oar_priority = vol_input[1]
+                vol_beam_plate_norm = vol_input[5]
                 
                 C, D, H, W = vol_input.shape
                 
                 pred_slices = []
                 
-                # Batch Inference Implementation
-                BATCH_SIZE = 16
-                vol_input_permuted = vol_input.permute(1, 0, 2, 3) # (D, C, H, W)
-                pred_slices = []
-                
-                for i in range(0, D, BATCH_SIZE):
-                    batch_input = vol_input_permuted[i:i+BATCH_SIZE].to(device).float()
-                    curr_bs = batch_input.size(0)
-                    
-                    if use_layout:
-                        # Expand layout data for the batch
-                        layout_batch = {
-                            'spacing': spacing_b.repeat(curr_bs, 1),
-                            'isocenter': isocenter_b.repeat(curr_bs, 1),
-                            'angle_list': angle_list_b * curr_bs
-                        }
-                        output, _, _ = model(batch_input, layout_batch)
-                    else:
-                        output, _, _ = model(batch_input)
+                # Slice-by-slice inference
+                for d in range(D):
+                    slice_input = vol_input[:, d, :, :].unsqueeze(0).to(device)
+
+                    output = sliding_window_inference(
+                        model, 
+                        slice_input, 
+                        layout_data=layout_data_slice, 
+                        window_size=args.window_size, 
+                        stride=args.stride, 
+                        device=device
+                    )
                     
                     output = output * cfig['scale_out']
+                    
                     pred_slices.append(output.cpu().numpy())
                 
                 preds_np = np.concatenate(pred_slices, axis=0)
@@ -134,9 +178,6 @@ if __name__ == "__main__":
 
                 preds_np = preds_np  * cfig['loader_params']['dose_div_factor']
                 labels_np = labels_np * cfig['loader_params']['dose_div_factor']
-
-                # Apply Body Mask to Prediction
-                preds_np = preds_np * body_np.astype(preds_np.dtype)
 
                 # --- Compute Metrics ---
                 if np.any(body_np):
@@ -153,22 +194,28 @@ if __name__ == "__main__":
                 if peak <= 0: peak = 1.0
                 
                 psnr = float('inf') if rmse == 0 else 20.0 * math.log10(peak / (rmse + 1e-12))
-                  
+                
                 print(f"[Case: {case_id}] Depth: {D} | MAE: {l1:.6f} | MSE: {mse:.6f} | RMSE: {rmse:.6f} | PSNR: {psnr:.3f} dB")
                 
-                # Define and create visualization directory
-                vis_dir = Path(save_pred_path) / 'visualization' / str(case_id)
-                vis_dir.mkdir(parents=True, exist_ok=True)
-                
-                global_metrics_path = Path(save_pred_path) / "global_metrics.txt"
-                with open(global_metrics_path, 'a', encoding='utf-8') as f:
-                    f.write(f"[Case: {case_id}] Depth: {D} | MAE: {l1:.6f} | MSE: {mse:.6f} | RMSE: {rmse:.6f} | PSNR: {psnr:.3f} dB")
-
                 total_l1.append(l1)
                 total_mse.append(mse)
                 total_rmse.append(rmse)
                 if np.isfinite(psnr):
                     total_psnr.append(psnr)
+                
+                # --- Visualization & Saving ---
+                vis_dir = Path(save_pred_path) / 'visualization' / str(case_id)
+                vis_dir.mkdir(parents=True, exist_ok=True)
+                
+                # Save Individual Metrics
+                metrics_path = vis_dir / f"{case_id}_metrics.txt"
+                with open(metrics_path, 'w', encoding='utf-8') as f:
+                    f.write(f"患者ID: {case_id}\n")
+                    f.write(f"注意：指标计算基于body mask掩膜后的剂量分布(Gy)\n\n")
+                    f.write(f"MSE: {mse:.6f} Gy²\n")
+                    f.write(f"RMSE: {rmse:.6f} Gy\n")
+                    f.write(f"MAE: {l1:.6f} Gy\n")
+                    f.write(f"PSNR: {psnr:.2f} dB\n\n")
                 
                 if args.visualize == 'on':
                     for d in range(D):
@@ -182,83 +229,55 @@ if __name__ == "__main__":
                         mask_ptv = (slice_ptv > 0).astype(float) 
                         mask_oar = (slice_oar > 0).astype(float)
                         
-                        # 3-column layout
-                        # Increase height to accommodate 2 rows
                         fig, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=100)
-                        axes = axes.flatten() # Flatten 2D array to 1D for easy indexing
+                        axes = axes.flatten()
                         
-                        # Determine dynamic range for dose maps
                         true_slice_max = np.max(s_true)
                         pred_slice_max = np.max(s_pred)
                         
-                        # Use the max of both for common scaling
                         vmax = max(true_slice_max, pred_slice_max)
                         if vmax <= 0: vmax = 1.0
                         vmin = 0.0
                         
-                        # --- Plot ground truth dose --- 
                         ax1 = axes[0]
                         ax1.set_title(f"Ground Truth Dose\nMax: {true_slice_max:.2f} Gy", fontsize=12)
                         im1 = ax1.imshow(s_true, cmap='jet', vmin=vmin, vmax=vmax, aspect='equal', origin='lower')
                         ax1.axis('off')
                         
-                        # --- Plot predicted dose --- 
                         ax2 = axes[1]
                         ax2.set_title(f"Predicted Dose\nMax: {pred_slice_max:.2f} Gy", fontsize=12)
                         im2 = ax2.imshow(s_pred, cmap='jet', vmin=vmin, vmax=vmax, aspect='equal', origin='lower')
                         ax2.axis('off')
-                        
-                        # --- Plot difference map --- 
+
+                        # Plot Difference
                         ax3 = axes[2]
-                        diff_slice = s_pred - s_true
-                        diff_max = max(abs(np.min(diff_slice)), abs(np.max(diff_slice)))
-                        if diff_max > 0:
-                            diff_vmin, diff_vmax = -diff_max, diff_max
-                        else:
-                            diff_vmin, diff_vmax = -1, 1
-                            
-                        ax3.set_title(f"Difference (Pred - GT)\nRange: [{np.min(diff_slice):.2f}, {np.max(diff_slice):.2f}] Gy", fontsize=12)
-                        im3 = ax3.imshow(diff_slice, cmap='RdBu_r', vmin=diff_vmin, vmax=diff_vmax, aspect='equal', origin='lower')
+                        diff_map = s_pred - s_true
+                        max_diff = np.max(np.abs(diff_map))
+                        ax3.set_title(f"Difference (Pred - GT)\nMax Diff: {max_diff:.2f} Gy", fontsize=12)
+                        im3 = ax3.imshow(diff_map, cmap='bwr', vmin=-max_diff, vmax=max_diff, aspect='equal', origin='lower')
                         ax3.axis('off')
 
-                        # --- Plot PTV ---
+                        # Plot PTV
                         ax4 = axes[3]
                         ax4.set_title("PTV Mask", fontsize=12)
-                        # 使用灰色或红色显示 mask
-                        im4 = ax4.imshow(mask_ptv, cmap='gray', vmin=0, vmax=1, aspect='equal', origin='lower')
+                        ax4.imshow(slice_ptv, cmap='gray', aspect='equal', origin='lower')
                         ax4.axis('off')
 
-                        # --- Plot OAR ---
+                        # Plot OAR
                         ax5 = axes[4]
-                        ax5.set_title("OAR Structure", fontsize=12)
-                        im5 = ax5.imshow(mask_oar, cmap='gray', vmin=0, vmax=1, aspect='equal', origin='lower')
+                        ax5.set_title("OAR Priority", fontsize=12)
+                        ax5.imshow(slice_oar, cmap='jet', aspect='equal', origin='lower')
                         ax5.axis('off')
 
-                        # --- Plot Beam Plate ---
+                        # Plot Beam
                         ax6 = axes[5]
                         ax6.set_title("Beam Plate", fontsize=12)
-                        im6 = ax6.imshow(slice_beam, cmap='viridis', aspect='equal', origin='lower') # 射束板适合用 viridis
+                        ax6.imshow(slice_beam, cmap='gray', aspect='equal', origin='lower')
                         ax6.axis('off')
-                        
-                        # --- Add colorbars (3-column layout style) ---
-                        # Adjust spacing: hspace for vertical gap between rows
-                        fig.subplots_adjust(right=0.85, wspace=0.2, hspace=0.3)
-                        
-                        # Dose colorbar (shared for GT and Pred)
-                        cbar_ax1 = fig.add_axes([0.87, 0.55, 0.02, 0.35])
-                        cbar1 = fig.colorbar(im1, cax=cbar_ax1)
-                        cbar1.set_label('Dose (Gy)', fontsize=10)
-                        
-                        # Difference colorbar
-                        cbar_ax2 = fig.add_axes([0.87, 0.1, 0.02, 0.35])
-                        cbar2 = fig.colorbar(im3, cax=cbar_ax2)
-                        cbar2.set_label('Difference (Gy)', fontsize=10)
-                        
-                        # --- Add main title ---
-                        fig.suptitle(f"Patient: {case_id} - Slice {d:03d}/{D-1}", fontsize=14, y=0.95)
-                        
-                        plt.savefig(vis_dir / f"{case_id}_slice_{d:03d}.png", bbox_inches='tight', dpi=100)
-                        plt.close(fig)
+
+                        plt.tight_layout()
+                        plt.savefig(vis_dir / f"slice_{d:03d}.png")
+                        plt.close()
 
     # Final Global Summary
     if len(total_l1) > 0:
@@ -277,7 +296,7 @@ if __name__ == "__main__":
         
         # Save Global Metrics
         global_metrics_path = Path(save_pred_path) / "global_metrics.txt"
-        with open(global_metrics_path, 'a', encoding='utf-8') as f:
+        with open(global_metrics_path, 'w', encoding='utf-8') as f:
             f.write(f"全局统计 (Total Cases: {len(total_l1)})\n")
             f.write(f"注意：指标为所有病例的平均值\n\n")
             f.write(f"Mean MSE: {mean_mse:.6f} Gy²\n")

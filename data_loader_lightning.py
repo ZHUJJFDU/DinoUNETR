@@ -116,10 +116,21 @@ class MyDataset(Dataset):
         In_dict['Body'] = (In_dict['Body'] > 0.5).type(torch.FloatTensor)
         In_dict['PTV_expanded'] = (In_dict['PTV_expanded'] > 0.5).type(torch.FloatTensor)
 
-        # if self.cfig['CatStructures']:
-        #     data_dict['data'] = torch.cat((cat_optptv, cat_ptv, cat_oar, In_dict['Body'], In_dict['img'], data_dict['beam_plate'], data_dict['angle_plate'], prompt_extend), axis=0)
-        # else:
-        data_dict['data'] = torch.cat((In_dict['comb_optptv'],  In_dict['comb_oar_priority'],  In_dict['comb_oar_distance'], In_dict['Body'], In_dict['mass_density'], In_dict['beam_plate_norm']), axis=0) # , In_dict['obj_2DGy'], In_dict['obj_2DWei']
+        # data_dict['data'] = torch.cat((
+        #     In_dict['comb_optptv'],  
+        #     In_dict['comb_oar_priority'],  
+        #     In_dict['comb_oar_distance'], 
+        #     In_dict['Body'], 
+        #     In_dict['mass_density'], 
+        #     In_dict['beam_plate_norm']), axis=0)
+
+        data_dict['data'] = torch.cat((
+            In_dict['mass_density'], 
+            In_dict['comb_optptv'],  
+            In_dict['comb_oar_priority'],  
+            In_dict['beam_plate_norm'],
+            In_dict['comb_oar_distance'], 
+            In_dict['Body']), axis=0)
 
         data_dict['Body'] = In_dict['Body']
 
@@ -136,7 +147,7 @@ class MyDataset(Dataset):
 
         data_dict['ori_img_size'] = torch.tensor(ori_img_size)
         data_dict['id'] = ID
-        data_dict['direction'] = torch.tensor(In_dict['direction'])
+        # data_dict['direction'] = torch.tensor(In_dict['direction'])
         
         del In_dict
         # print(data_dict['data'].shape) # C D H W
