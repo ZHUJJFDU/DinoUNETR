@@ -24,6 +24,7 @@ safetensors
 einops
 opencv-python
 monai
+torchdiffeq
 
 # 数据可视化与交互式应用
 matplotlib
@@ -36,31 +37,4 @@ hvplot
 datashader
 panel
 streamlit
-
-# 网页开发、爬虫与 API
-flask
-requests
-httpx
-aiohttp
-beautifulsoup4
-scrapy
-
-# 办公与辅助工具
-openpyxl
-xlwings
-sqlalchemy
-pydantic
-tqdm
-joblib
-s3fs
-nltk
-
-# 开发环境与调试 (IDE/Jupyter)
-jupyter
-notebook
-spyder
-ipython
-black
-pylint
-flake8
-pytest
+tensorboardX

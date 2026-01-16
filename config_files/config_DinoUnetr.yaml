@@ -25,7 +25,7 @@ model_params:
     input_channels: 6
     out_channels: 1
     
-strategy: 'default' # Options: lora, llrd, frozen, default
+strategy: 'default' # Options: lora, llrd, frozen, adapter, default
 layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
 use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
 

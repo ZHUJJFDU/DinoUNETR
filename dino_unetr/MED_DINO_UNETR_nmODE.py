@@ -2,7 +2,7 @@ import os
 import sys
 import torch
 import torch.nn as nn
-
+from torchdiffeq import odeint
 # Ensure we can import from the local dinov3 package
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -160,46 +160,49 @@ class Deconv2DBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+class nmODEFunc(nn.Module):
+    def __init__(self):
+        super(nmODEFunc, self).__init__()
+        self.gamma = None # 用于存储外部驱动 F(x)
+        
+    def fresh(self, gamma):
+        """注入外部驱动力 F(x)"""
+        self.gamma = gamma
+        
+    def forward(self, t, p):
+        # 论文公式: dy/dt = -y + sin^2(y + F(x))
+        dpdt = -p + torch.sin(p + self.gamma)**2
+        return dpdt
+
 class nmODEBlock(nn.Module):
-    def __init__(self, in_channels, steps=2, dt=0.1):
-        """
-        Args:
-            in_channels: 输入特征图的通道数
-            steps: ODE 求解器的迭代步数 (论文中 T 的概念)
-            dt: 时间步长
-        """
+    def __init__(self, channels):
         super().__init__()
-        self.steps = steps
-        self.dt = dt
+        self.odefunc = nmODEFunc()
         
-        # 对应论文公式中的 F(x)
-        # 用于提取外部驱动力的特征
-        self.conv_f = nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1)
+        self.drive_conv = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, 1, 1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU()
+        )
         
-        # 既然是回归任务，可以在 F(x) 后加一个 Normalization 保持分布稳定
-        self.norm = nn.GroupNorm(min(4, in_channels), in_channels) 
+        self.out_conv = nn.Conv2d(channels, channels, 1)
 
     def forward(self, x):
-        # x: 来自解码器的特征图 (外部输入)
+        # 1. 计算外部驱动 F(x)
+        drive = self.drive_conv(x)
         
-        # 计算驱动力 F(x)
-        drive = self.norm(self.conv_f(x))
+        # 2. 注入驱动力到 ODE 函数中
+        self.odefunc.fresh(drive)
         
-        # 初始化状态 y(0)。
-        # 论文中 y 是独立状态，但在实践中，将输入 x 作为初始猜测 y(0) 
-        # 通常能让模型收敛得更快（类似于 ResNet 的思想）。
-        y = x.clone()
+        # 3. 定义初始状态 y(0)
+        y0 = torch.zeros_like(x)
         
-        # 欧拉法求解微分方程 (Euler Method)
-        for _ in range(self.steps):
-            # 论文公式 (1): dy/dt = -y + sin^2(y + F(x))
-            # torch.sin()**2 即为 sin^2
-            derivative = -y + torch.sin(y + drive)**2
-            
-            # 更新状态: y(t+1) = y(t) + dy/dt * dt
-            y = y + derivative * self.dt
-            
-        return y
+        # 4. 求解 ODE (积分时间 0 -> 1)
+        times = torch.tensor([0, 1.0]).type_as(x)
+        out = odeint(self.odefunc, y0, times, method='rk4')[1]
+        
+        # 5. 输出变换
+        return self.out_conv(out)
 
 # --- Main Model ---
 class MED_DINO_UNETR(nn.Module):
@@ -253,9 +256,8 @@ class MED_DINO_UNETR(nn.Module):
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.1, inplace=False),
             
-            # [新增] 插入 nmODE 模块
             # 在 16 通道上进行非线性动力学修正
-            nmODEBlock(in_channels=16, steps=3), 
+            nmODEBlock(channels=16), 
             
             # 最终输出层 (16 -> output_dim)
             nn.Conv2d(16, output_dim, kernel_size=1),

@@ -237,7 +237,7 @@ if __name__ == '__main__':
     
     print(f"Initializing MED_DINO_UNETR with checkpoint: {ckpt_path}")
     model = MED_DINO_UNETR(checkpoint_path=ckpt_path)
-    # print(model)
+    print(model)
     
     # Test Forward Pass
     print("\nTesting forward pass...")
