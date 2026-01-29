@@ -13,13 +13,23 @@ Lung_OAR_LIST = ["PTV_Ring.3-2", "Total Lung-GTV", "SpinalCord", "Heart", "LAD",
 Lung_OAR_DICT = {Lung_OAR_LIST[i]: (i+10) for i in range(len(Lung_OAR_LIST))}
 
 
+from monai.transforms import (
+    Compose,
+    Resized,
+    RandFlipd, 
+    RandRotated,
+    RandSpatialCropd,
+    CenterSpatialCropd
+)
+
 class ProcessedSliceDataset(Dataset):
     """
     专门用于读取预处理后的 2D 切片数据 (.npz)
     """
-    def __init__(self, data_root, phase='train'):
+    def __init__(self, data_root, cfig, phase='train'):
         self.data_root = data_root
         self.phase = phase
+        self.cfig = cfig
         
         search_path = os.path.join(data_root, "*.npz")
         self.file_list = glob.glob(search_path)
@@ -28,6 +38,74 @@ class ProcessedSliceDataset(Dataset):
             raise ValueError(f"No .npz files found in {data_root}. Please check the path.")
             
         print(f"[{phase}] Initialized dataset from {data_root}. Total slices: {len(self.file_list)}")
+
+        # --- Transforms Setup ---
+        self.out_size = cfig.get('out_size', [96, 256, 256]) # [D, H, W] but dataset is [H, W] usually
+        # Note: cfig['out_size'] is typically [96, 256, 256] from config
+        # But our 2D slice data is (C, H, W). We only crop H and W. 
+        self.target_h = self.out_size[1]
+        self.target_w = self.out_size[2]
+        
+        # Initialize croppers / transforms
+        # IMPORTANT: Applying transforms to ALL spatial keys to ensure alignment. 
+        # If 'body' or 'ptv' are used in Loss, they MUST be transformed identically to 'data' and 'label'.
+        self.keys = ['data', 'label', 'body', 'ptv', 'oar_serial', 'oar_parallel']
+        
+        # 2D Augmentation Pipeline inspired by toolkit.py
+        # Adapting 3D logic to 2D: [H, W]
+        # in_size and out_size are treated as target_h, target_w
+        
+        target_size = [self.target_h, self.target_w]
+        resize_size = [int(self.target_h * 1.2), int(self.target_w * 1.2)]
+        min_crop_size = [int(self.target_h * 0.85), int(self.target_w * 0.85)]
+        
+        self.train_transforms = Compose([
+            # 1. Resize to 1.2x target size (Downsample from 512 if input is 512, or Upsample if 256)
+            Resized(keys=self.keys, spatial_size=resize_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True),
+            
+            # 2. Random Crop (0.85x to 1.2x)
+            RandSpatialCropd(
+                keys=self.keys, 
+                roi_size=min_crop_size, 
+                max_roi_size=resize_size, 
+                random_center=True, 
+                random_size=True, 
+                allow_missing_keys=True
+            ),
+            
+            # 3. Random Rotate
+            # Modified: range_x=0.2 (~11 degrees) to be physically realistic
+            RandRotated(keys=self.keys, prob=0.8, range_x=0.2, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], padding_mode='zeros', allow_missing_keys=True),
+            
+            # 4. Random Flip
+            # Modified: Removed spatial_axis=2 (Z-flip) as it's anatomically incorrect for 3D volumes (head-feet flip)
+            # But for 2D slices (H, W), axis 0 is H (Ant-Post/Left-Right depends on view), axis 1 is W.
+            # Assuming H=Ant-Post, W=Left-Right. Flipping Left-Right (W, axis 1) is valid data augmentation (mirroring).
+            # Flipping Ant-Post (H, axis 0) might be weird?
+            # User said "Removing spatial_axis=2". Slice data is (C, H, W). Dimensions are 1, 2. (0 is channel).
+            # MONAI RandFlipd spatial_axis refers to spatial dims index.
+            # If 2D, spatial_axis=0 is H, spatial_axis=1 is W.
+            # User's request about "Z axis" implies they thought of 3D data.
+            # In 2D slice loader:
+            # We are likely looking at Axial slices. H=AP, W=LR.
+            # Rotations are in-plane.
+            # Flip axis 1 (LR) is standard.
+            # Flip axis 0 (AP) is non-standard (changing patient from supine to prone?).
+            # I will keep axis 0 and 1 relative to the SLICE if that was the original intent for "3 axes probability 0.4".
+            # The original toolkit had axis 0, 1, 2 for 3D.
+            # For 2D, we only have 0 and 1.
+            # I'll keep both for now unless "spatial_axis=2" was the ONLY objection.
+            RandFlipd(keys=self.keys, prob=0.4, spatial_axis=0, allow_missing_keys=True),
+            RandFlipd(keys=self.keys, prob=0.4, spatial_axis=1, allow_missing_keys=True),
+            
+            # 5. Restore to target size
+            Resized(keys=self.keys, spatial_size=target_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True)
+        ])
+        
+        self.val_transforms = Compose([
+             Resized(keys=self.keys, spatial_size=target_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True)
+        ])
+
 
     def __len__(self):
         return len(self.file_list)
@@ -93,18 +171,29 @@ class ProcessedSliceDataset(Dataset):
             oar_serial = torch.from_numpy(oar_serial).float()
             oar_parallel = torch.from_numpy(oar_parallel).float()
 
+            # --- Augmentation Logic ---
+            # Construct Dictionary for Transforms
             data_dict = {
                 'data': data,
                 'label': label,
-                'body':body,
+                'body': body,
                 'ptv': ptv,
                 'oar_serial': oar_serial,
-                'oar_parallel': oar_parallel,
-                'isocenter': isocenter,
-                'spacing': spacing,
-                'angle_list': angle_list_str,
-                'id': os.path.basename(file_path).replace('.npz', '') 
+                'oar_parallel': oar_parallel
             }
+            
+            if self.phase == 'train':
+                data_dict = self.train_transforms(data_dict)
+            else:
+                data_dict = self.val_transforms(data_dict)
+            
+            # Update metadata in dict
+            data_dict['isocenter'] = isocenter
+            data_dict['spacing'] = spacing
+            data_dict['angle_list'] = angle_list_str
+            data_dict['id'] = os.path.basename(file_path).replace('.npz', '') 
+            
+            return data_dict
             
             
             return data_dict
@@ -118,13 +207,23 @@ class GetLoader(object):
         super().__init__()
         self.cfig = cfig
         
-        self.train_root = os.path.join('Dataset_256', 'Train')
-        self.valid_root = os.path.join('Dataset_256', 'Valid')
-        self.test_root = os.path.join('Dataset_256', 'Test')
+        # Updated to point to Dataset_512
+        # Use absolute path or relative? Original was 'Dataset_256'
+        # User updated run_process.py to save to D:/data/Dataset_512 
+        # But let's check if user wants absolute path.
+        # User's run_process.py change: 'D:/data/Dataset_512/Train'
+        # If running locally, we should probably stick to what exists or what user specified.
+        # Assuming the generated data is where the user put it. 
+        # **Crucial**: The user modified run_process.py to save to `D:/data/Dataset_512`.
+        # So we should look there.
+        
+        self.train_root = 'D:/data/Dataset_512/Train'
+        self.valid_root = 'D:/data/Dataset_512/Valid'
+        self.test_root = 'D:/data/Dataset_512/Test'
         
     def train_dataloader(self):
         # 直接实例化新的 Dataset
-        dataset = ProcessedSliceDataset(data_root=self.train_root, phase='train')
+        dataset = ProcessedSliceDataset(data_root=self.train_root, cfig=self.cfig, phase='train')
         
         kwargs = {
             'batch_size': self.cfig['train_bs'],
@@ -142,7 +241,7 @@ class GetLoader(object):
 
     def val_dataloader(self):
         # 验证集
-        dataset = ProcessedSliceDataset(data_root=self.valid_root, phase='valid')
+        dataset = ProcessedSliceDataset(data_root=self.valid_root, cfig=self.cfig, phase='valid')
         
         kwargs = {
             'batch_size': self.cfig['val_bs'],
@@ -164,7 +263,7 @@ class GetLoader(object):
     
     def test_dataloader(self):
         # 测试集
-        dataset = ProcessedSliceDataset(data_root=self.test_root, phase='test')
+        dataset = ProcessedSliceDataset(data_root=self.test_root, cfig=self.cfig, phase='test')
         
         kwargs = {
             'batch_size': self.cfig['val_bs'],
@@ -172,7 +271,7 @@ class GetLoader(object):
             'num_workers': self.cfig['num_workers'],
         }
         if torch.cuda.is_available():
-            kwargs['pin_memory'] = True
+             kwargs['pin_memory'] = True
         if self.cfig['num_workers'] > 0:
             kwargs['persistent_workers'] = True
             if 'prefetch_factor' in self.cfig:

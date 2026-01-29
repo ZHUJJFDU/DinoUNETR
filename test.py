@@ -1,7 +1,0 @@
-print("\n" + "="*50)
-print(f"[Final Global Summary] Total Cases Processed: 224")
-print(f"Mean MAE (L1): 1.666376")
-print(f"Mean MSE:      6.714476")
-print(f"Mean RMSE:     2.532134")
-print(f"Mean PSNR:     29.304 dB")
-print("="*50)

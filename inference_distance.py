@@ -9,7 +9,6 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from datetime import datetime
 import sys
-from scipy.ndimage import binary_erosion
 import torch.nn.functional as F
 
 # Ensure current dir is in path
@@ -18,7 +17,7 @@ if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 # Import the new Lightning Module
-from train_lightning import GDPLightningModel
+from train_lightning_distance import GDPDistanceLightningModel
 
 if __name__ == "__main__": 
 
@@ -52,7 +51,7 @@ if __name__ == "__main__":
         cfig['model_params'] = {'input_channels': 6}
 
     try:
-        pl_module = GDPLightningModel.load_from_checkpoint(
+        pl_module = GDPDistanceLightningModel.load_from_checkpoint(
             checkpoint_path, 
             cfig=cfig, 
             strategy=strategy,
@@ -61,7 +60,7 @@ if __name__ == "__main__":
     except Exception as e:
         print(f"Failed to load with strict=True: {e}")
         print("Retrying with strict=False...")
-        pl_module = GDPLightningModel.load_from_checkpoint(
+        pl_module = GDPDistanceLightningModel.load_from_checkpoint(
             checkpoint_path, 
             cfig=cfig, 
             strategy=strategy,
@@ -139,12 +138,8 @@ if __name__ == "__main__":
                     preds_np = preds_np  * cfig['loader_params']['dose_div_factor']
                     labels_np = labels_np * cfig['loader_params']['dose_div_factor']
 
-                # Apply Body Mask to Prediction and Label
-                # Erode body mask by 1 pixel to remove boundary artifacts
-                body_np = binary_erosion(body_np, structure=np.ones((1, 1, 3, 3))).astype(body_np.dtype)
-                
+                # Apply Body Mask to Prediction
                 preds_np = preds_np * body_np.astype(preds_np.dtype)
-                labels_np = labels_np * body_np.astype(labels_np.dtype)
 
                 # --- RESIZE TO ORIGINAL SIZE FOR EVALUATION ---
                 if 'ori_img_size' in batch:
@@ -191,7 +186,6 @@ if __name__ == "__main__":
                 rmse = math.sqrt(mse)
                 
                 peak = float(np.max(labels_np)) 
-                # If peak is 0 or negative (unlikely for dose), check pred max
                 if peak <= 0: peak = float(np.max(preds_np))
                 if peak <= 0: peak = 1.0
                 

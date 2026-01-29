@@ -4,7 +4,7 @@ loader_params:
 
     'train_bs': 64
     'val_bs': 64
-    'csv_root': 'meta_files\meta_data_train_NaH.csv'
+    'csv_root': 'meta_files\meta_data_train_NaH&Lung.csv'
     'csv_HaN_OAR_priority_root': 'meta_files/HaN_OAR_update.csv'
     'csv_LUNG_OAR_priority_root': 'meta_files/LUNG_OAR_update.csv'
     'scale_dose_dict': 'meta_files/PTV_DICT.json'
@@ -31,7 +31,8 @@ use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
 
 lr: 0.0001
 
-num_epochs: 200
+max_steps: 1000000
+num_epochs: 200 # Will be ignored/overridden if max_steps is used in Trainer, or used as fallback
 
 act_sig: True
 

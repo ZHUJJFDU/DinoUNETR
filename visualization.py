@@ -4,12 +4,13 @@ import os
 
 # ---------------------- 1. 加载数据 ----------------------
 # 加载原始数据
-path_orig = r'D:\GDP-HMM_Challenge\train\0522c0001+9Ag+MOS_23629.npz'
+path_orig = r'D:\GDP-HMM_Challenge\valid_dose\0522c0002+15Ag+MOS_21176.npz'
 data_npz_orig = np.load(path_orig, allow_pickle=True)
 dict_orig = dict(data_npz_orig)['arr_0'].item()
+print(dict_orig.keys())
 
 # 加载预处理后的数据
-path_proc = r'C:\Users\960\Desktop\Top2\data\dataset_update_NaH\0522c0001+9Ag+MOS_23629.npz'
+path_proc = r'C:\Users\960\Desktop\Top2\data\dataset_update_NaH\0522c0002+15Ag+MOS_21176.npz'
 data_npz_proc = np.load(path_proc, allow_pickle=True)
 dict_proc = dict(data_npz_proc)['arr_0'].item()
 
@@ -36,34 +37,53 @@ def plot_ortho(data_dict, key_list, fig_title):
             
         vol = data_dict[key]
         
-        # 确保数据至少是3维的，防止报错
-        if len(vol.shape) < 3:
-            print(f"Skipping {key}: shape is {vol.shape}, not 3D.")
-            continue
-
         # 选择配色方案：Dose或Priority通常用彩色(jet)，解剖结构用灰度(gray)
         cmap = 'jet' if 'dose' in key.lower() or 'priority' in key.lower() or 'dist' in key.lower() else 'gray'
 
-        # --- Axial (横断面) ---
-        ax1 = fig.add_subplot(n_rows, n_cols, i*3 + 1)
-        # 原始代码逻辑: ct[z]
-        ax1.imshow(vol[iso[0]], cmap=cmap)
-        ax1.set_title(f'{key} - Axial', fontsize=10)
-        ax1.axis('off')
+        if len(vol.shape) == 2:
+            # 2D 数据处理 (如 angle_plate)，直接在三个视图显示同一张图
+            # Axial
+            ax1 = fig.add_subplot(n_rows, n_cols, i*3 + 1)
+            ax1.imshow(vol, cmap=cmap)
+            ax1.set_title(f'{key} - Axial (2D)', fontsize=10)
+            ax1.axis('off')
 
-        # --- Sagittal (矢状面) ---
-        ax2 = fig.add_subplot(n_rows, n_cols, i*3 + 2)
-        # 原始代码逻辑: ct[::-1, y, :] (Z轴翻转)
-        ax2.imshow(vol[::-1, iso[1], :], cmap=cmap)
-        ax2.set_title(f'{key} - Sagittal', fontsize=10)
-        ax2.axis('off')
+            # Sagittal
+            ax2 = fig.add_subplot(n_rows, n_cols, i*3 + 2)
+            ax2.imshow(vol, cmap=cmap)
+            ax2.set_title(f'{key} - Sagittal (2D)', fontsize=10)
+            ax2.axis('off')
 
-        # --- Coronal (冠状面) ---
-        ax3 = fig.add_subplot(n_rows, n_cols, i*3 + 3)
-        # 原始代码逻辑: ct[::-1, ::-1, x] (Z轴和Y轴都翻转)
-        ax3.imshow(vol[::-1, ::-1, iso[2]], cmap=cmap)
-        ax3.set_title(f'{key} - Coronal', fontsize=10)
-        ax3.axis('off')
+            # Coronal
+            ax3 = fig.add_subplot(n_rows, n_cols, i*3 + 3)
+            ax3.imshow(vol, cmap=cmap)
+            ax3.set_title(f'{key} - Coronal (2D)', fontsize=10)
+            ax3.axis('off')
+
+        elif len(vol.shape) == 3:
+            # --- Axial (横断面) ---
+            ax1 = fig.add_subplot(n_rows, n_cols, i*3 + 1)
+            # 原始代码逻辑: ct[z]
+            ax1.imshow(vol[iso[0]], cmap=cmap)
+            ax1.set_title(f'{key} - Axial', fontsize=10)
+            ax1.axis('off')
+
+            # --- Sagittal (矢状面) ---
+            ax2 = fig.add_subplot(n_rows, n_cols, i*3 + 2)
+            # 原始代码逻辑: ct[::-1, y, :] (Z轴翻转)
+            ax2.imshow(vol[::-1, iso[1], :], cmap=cmap)
+            ax2.set_title(f'{key} - Sagittal', fontsize=10)
+            ax2.axis('off')
+
+            # --- Coronal (冠状面) ---
+            ax3 = fig.add_subplot(n_rows, n_cols, i*3 + 3)
+            # 原始代码逻辑: ct[::-1, ::-1, x] (Z轴和Y轴都翻转)
+            ax3.imshow(vol[::-1, ::-1, iso[2]], cmap=cmap)
+            ax3.set_title(f'{key} - Coronal', fontsize=10)
+            ax3.axis('off')
+        else:
+            print(f"Skipping {key}: shape is {vol.shape}, not 2D or 3D.")
+            continue
 
     plt.tight_layout(rect=[0, 0.03, 1, 0.97]) # 调整布局给title留位置
     plt.show()
