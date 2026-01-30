@@ -126,9 +126,6 @@ def inference_simple():
         print("Error: Config is missing 'save_model_root' or 'save_model_path'.")
         return
 
-    # If save_model_root is a directory, find the best checkpoint or last checkpoint
-    # For simplicity, let's assume user passes a .ckpt path in 'save_model_path' often used in inference configs
-    # If not, try to find one in the root.
     if os.path.isdir(checkpoint_path):
         potential_ckpts = [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
         if not potential_ckpts:

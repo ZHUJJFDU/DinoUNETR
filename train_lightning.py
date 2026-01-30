@@ -22,7 +22,7 @@ from dino_unetr.MED_DINO_UNETR import MED_DINO_UNETR as MED_DINO_UNETR_Basic
 from dino_unetr.MED_DINO_UNETR_layout import MED_DINO_UNETR as MED_DINO_UNETR_Layout
 from dino_unetr.MED_DINO_UNETR_nmODE import MED_DINO_UNETR as MED_DINO_UNETR_nmODE
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
-from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_conv_adapter
+from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_conv_adapter, inject_mdt_adapter
 from toolkit import compute_pca_projection
 
 class GDPLightningModel(pl.LightningModule):
@@ -75,6 +75,12 @@ class GDPLightningModel(pl.LightningModule):
             kernel_size = cfig.get('adapter_kernel_size', 3)
             inject_conv_adapter(self.model, bottleneck_dim=bottleneck_dim, kernel_size=kernel_size)
             # inject_conv_adapter 内部已经处理了参数冻结和 adapter 可训练
+
+        elif self.strategy == 'mdt':
+            print(">>> Strategy: MDT Adapter Enabled.")
+            reduction = cfig.get('mdt_reduction', 4)
+            inject_mdt_adapter(self.model, reduction=reduction)
+            # inject_mdt_adapter also handles freezing and unfreezing logic
                     
         elif self.strategy == 'llrd':
             print(">>> Strategy: LLRD Enabled.")
@@ -327,7 +333,7 @@ def run_tuning(args, cfig):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Process some integers.')
-    parser.add_argument('cfig_path', type=str, default='config_files\config_DinoUnetr.yaml')
+    parser.add_argument('cfig_path', type=str, nargs='?',default='config_files\config_DinoUnetr.yaml')
     parser.add_argument('--ckpt_path', default=None, type=str, help='Path to checkpoint to resume training from')
     parser.add_argument('--tune', action='store_true', help='Run Optuna hyperparameter tuning')
     args = parser.parse_args()

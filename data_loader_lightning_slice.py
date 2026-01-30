@@ -46,14 +46,7 @@ class ProcessedSliceDataset(Dataset):
         self.target_h = self.out_size[1]
         self.target_w = self.out_size[2]
         
-        # Initialize croppers / transforms
-        # IMPORTANT: Applying transforms to ALL spatial keys to ensure alignment. 
-        # If 'body' or 'ptv' are used in Loss, they MUST be transformed identically to 'data' and 'label'.
         self.keys = ['data', 'label', 'body', 'ptv', 'oar_serial', 'oar_parallel']
-        
-        # 2D Augmentation Pipeline inspired by toolkit.py
-        # Adapting 3D logic to 2D: [H, W]
-        # in_size and out_size are treated as target_h, target_w
         
         target_size = [self.target_h, self.target_w]
         resize_size = [int(self.target_h * 1.2), int(self.target_w * 1.2)]

@@ -2,75 +2,154 @@ import os
 import yaml
 import numpy as np
 import torch
+import pandas as pd
+import json
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
-# 导入你的 Dataset 类
-# 确保 data_loader_lightning.py 在同一目录下，或者在 PYTHONPATH 中
-from data_loader_lightning import MyDataset 
+from data_loader_lightning import MyDataset
+from toolkit import tt_augmentation
 
 # --- 全局变量设置 ---
-# 定义全局变量，方便线程访问，避免反复传递大对象
 GLOBAL_DATASET = None
 SAVE_ROOT = None
 
+class ProcessDataset(MyDataset):
+    """
+    继承 MyDataset，但在 __getitem__ 中强制保持原始 Z 轴深度。
+    仅 Resize X 和 Y 到 config 指定的大小 (例如 256x256)。
+    """
+    def __getitem__(self, index):
+        data_path = self.data_list[index]
+        ID = self.data_list[index].split('/')[-1].replace('.npz', '')
+        
+        data_npz = np.load(data_path, allow_pickle=True)
+        In_dict = dict(data_npz)['arr_0'].item()
+
+        isocenter = In_dict['isocenter']
+        spacing = In_dict['spacing']
+        angle_list = In_dict['angle_list']
+        ori_img_size = In_dict['Body'].shape # (D, H, W)
+
+        # 1. 动态确定目标尺寸
+        # target_z = 原始深度
+        # target_h, target_w = yaml配置的 out_size (例如 256, 256)
+        target_z = ori_img_size[0]
+        target_h = self.cfig['out_size'][1]
+        target_w = self.cfig['out_size'][2]
+        
+        target_size = [target_z, target_h, target_w]
+
+        KEYS = list(In_dict.keys())
+        for key in In_dict.keys(): 
+            if isinstance(In_dict[key], np.ndarray) and len(In_dict[key].shape) == 3: 
+                In_dict[key] = torch.from_numpy(In_dict[key].astype('float'))[None] 
+            else:
+                KEYS.remove(key)
+
+        # 2. 强制使用 tt_augmentation (测试时增强，即Resize) 
+        # 并且传入我们动态计算的 target_size
+        self.aug = tt_augmentation(KEYS, self.cfig['in_size'], target_size, isocenter)
+
+        # 应用数据增强 (Resize)
+        In_dict = self.aug(In_dict)
+        for k in list(In_dict.keys()):
+            v = In_dict[k]
+            if isinstance(v, torch.Tensor) and v.dim() == 4:
+                v[torch.isnan(v)] = 0
+                v[torch.isinf(v)] = 0
+                In_dict[k] = v
+        
+        data_dict = dict()
+
+        if 'label' in In_dict.keys():
+            data_dict['label'] = In_dict['label']
+            # ref_dose = In_dict['label'] * 1
+            # data_dict['ref_5Gy_mask'] = (ref_dose > 5) & (In_dict['Body'] > 0)
+
+        In_dict['Body'] = (In_dict['Body'] > 0.5).type(torch.FloatTensor)
+        if 'PTV_expanded' in In_dict:
+            In_dict['PTV_expanded'] = (In_dict['PTV_expanded'] > 0.5).type(torch.FloatTensor)
+
+        # 拼接 Data (6通道)
+        # 注意：这里需要确保 In_dict 里包含所有需要的键，如果用了 SimpleDataset 逻辑可能会少键
+        # 但我们继承自 MyDataset，假设原始数据是完整的
+        try:
+             data_dict['data'] = torch.cat((
+                In_dict['mass_density'], 
+                In_dict['comb_optptv'],  
+                In_dict['comb_oar_priority'],  
+                In_dict['beam_plate_norm'],
+                In_dict['comb_oar_distance'], 
+                In_dict['Body']
+            ), axis=0)
+        except KeyError as e:
+            # Fallback if specific keys missing (should ensure reliability)
+            print(f"Warning: Missing key {e} for {ID}")
+            raise e
+
+        data_dict['Body'] = In_dict['Body']
+
+        if 'PTV' in In_dict: data_dict['PTV'] = In_dict['PTV'] * In_dict['Body']
+        if 'oar_serial' in In_dict: data_dict['oar_serial'] = In_dict['oar_serial'] * In_dict['Body']
+        if 'oar_parallel' in In_dict: data_dict['oar_parallel'] = In_dict['oar_parallel'] * In_dict['Body']
+        
+        data_dict['ori_isocenter'] = torch.tensor(isocenter)
+        data_dict['spacing'] = torch.tensor(spacing)
+        data_dict['angle_list'] = angle_list
+        data_dict['ori_img_size'] = torch.tensor(ori_img_size)
+        data_dict['id'] = ID
+        
+        del In_dict
+        return data_dict
+
 def process_one_case(index):
     """
-    单个线程执行的函数：处理一个病例的所有切片
+    单个线程执行的函数
     """
     try:
-        # 1. 从全局 Dataset 获取数据 (IO读取)
-        # 注意：这里会触发 MyDataset.__getitem__ 里的 np.load
         data_dict = GLOBAL_DATASET[index]
-        
         case_id = data_dict['id']
         
-        # 2. 获取 3D 数据
-        # 假设 MyDataset 输出是 (C, D, H, W)
         img_3d = data_dict['data']   
-        label_3d = data_dict['label']
+        label_3d = data_dict.get('label', None)
         body_3d = data_dict['Body']
         
-        # 获取 DVH Loss 所需的掩膜
-        ptv_3d = data_dict['PTV']
-        oar_serial_3d = data_dict['oar_serial']
-        oar_parallel_3d = data_dict['oar_parallel']
+        # 可选 Keys
+        ptv_3d = data_dict.get('PTV', None)
+        oar_serial_3d = data_dict.get('oar_serial', None)
+        oar_parallel_3d = data_dict.get('oar_parallel', None)
 
         isocenter = data_dict['ori_isocenter']
         spacing = data_dict['spacing']
         angle_list = data_dict['angle_list']
         
-        # 3. 确定深度
         depth = img_3d.shape[1] 
         
-        # 4. 遍历切片并保存
         for d in range(depth):
-            # 切片逻辑: (C, D, H, W) -> 取第 d 层 -> (C, H, W)
-            # 使用 .clone() 确保内存连续性（有时候对多线程安全有帮助）
             slice_data = img_3d[:, d, :, :].clone().numpy()
-            slice_label = label_3d[:, d, :, :].clone().numpy()
             slice_body = body_3d[:, d, :, :].clone().numpy()
             
-            slice_ptv = ptv_3d[:, d, :, :].clone().numpy()
-            slice_oar_serial = oar_serial_3d[:, d, :, :].clone().numpy()
-            slice_oar_parallel = oar_parallel_3d[:, d, :, :].clone().numpy()
+            slice_label = label_3d[:, d, :, :].clone().numpy() if label_3d is not None else None
+            slice_ptv = ptv_3d[:, d, :, :].clone().numpy() if ptv_3d is not None else None
+            slice_oar_serial = oar_serial_3d[:, d, :, :].clone().numpy() if oar_serial_3d is not None else None
+            slice_oar_parallel = oar_parallel_3d[:, d, :, :].clone().numpy() if oar_parallel_3d is not None else None
             
-            # 保存: caseID_sliceIndex.npz
-            # 这里的命名规则改为简单的 caseID_sliceIndex，因为没有随机 crop 了
             save_name = f"{case_id}_{d:03d}.npz"
             save_path = os.path.join(SAVE_ROOT, save_name)
             
-            np.savez_compressed(save_path, 
-                                data=slice_data, 
-                                label=slice_label, 
-                                body=slice_body,
-                                ptv=slice_ptv,
-                                oar_serial=slice_oar_serial,
-                                oar_parallel=slice_oar_parallel,
-                                isocenter=isocenter,
-                                spacing=spacing,
-                                angle_list=np.array(angle_list, dtype=object)
-                                )
+            save_dict = {
+                'data': slice_data,
+                'body': slice_body,
+                'isocenter': isocenter,
+                'spacing': spacing,
+                'angle_list': np.array(angle_list, dtype=object)
+            }
+            if slice_label is not None: save_dict['label'] = slice_label
+            if slice_ptv is not None: save_dict['ptv'] = slice_ptv
+            if slice_oar_serial is not None: save_dict['oar_serial'] = slice_oar_serial
+            if slice_oar_parallel is not None: save_dict['oar_parallel'] = slice_oar_parallel
+            
+            np.savez_compressed(save_path, **save_dict)
             
         return f"Success: {case_id} ({depth} slices)"
     
@@ -80,14 +159,13 @@ def process_one_case(index):
 def main():
     global GLOBAL_DATASET, SAVE_ROOT
     
-    # --- 1. 配置 ---
-    cfig_path = 'config_files/config_DinoUnetr.yaml' # 确保路径正确
-    max_workers = 4 # 线程数，建议设置为 CPU 核心数 或 稍微大一点（取决于硬盘读写速度）
+    cfig_path = 'config_files/config_DinoUnetr.yaml' 
+    max_workers = 4 
 
     print("Loading configuration...")
     cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
 
-    # 定义处理任务列表： (保存路径, phase, dev_split)
+    # 任务列表
     tasks = [
         ('D:/data/Dataset_512/Train', 'train', 'train'),
         ('D:/data/Dataset_512/Valid', 'train', 'valid'),
@@ -97,37 +175,29 @@ def main():
     for task_idx, (save_dir, phase, dev_split) in enumerate(tasks):
         print(f"\n{'='*20} Task {task_idx+1}/{len(tasks)}: Processing {phase}/{dev_split} {'='*20}")
         
-        # --- 2. 初始化当前任务 ---
         SAVE_ROOT = save_dir
         os.makedirs(SAVE_ROOT, exist_ok=True)
         
-        print(f"Initializing dataset for phase='{phase}', dev_split='{dev_split}'...")
-        # 实例化 Dataset
-        GLOBAL_DATASET = MyDataset(cfig['loader_params'], phase=phase, dev_split=dev_split)
+        print(f"Initializing ProcessDataset (Dynamic Z, Fixed XY) for phase='{phase}'...")
+        # 使用自定义的 ProcessDataset
+        GLOBAL_DATASET = ProcessDataset(cfig['loader_params'], phase=phase, dev_split=dev_split)
         
         total_cases = len(GLOBAL_DATASET)
         print(f"Dataset initialized. Total volumes: {total_cases}")
         print(f"Output directory: {SAVE_ROOT}")
-        print(f"Starting multi-threading processing with {max_workers} workers...")
+        print(f"Starting processing with {max_workers} workers...")
 
-        # --- 3. 多线程执行 ---
-        # 使用 ThreadPoolExecutor 管理线程池
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # 提交所有任务
-            # future_to_idx 是一个字典，映射 future 对象到 原始索引
             future_to_idx = {executor.submit(process_one_case, i): i for i in range(total_cases)}
             
-            # 使用 tqdm 显示进度
-            # as_completed 会在某个任务完成时立刻 yield
-            for future in tqdm(as_completed(future_to_idx), total=total_cases, unit="case", desc=f"Task {task_idx+1}"):
+            for future in tqdm(as_completed(future_to_idx), total=total_cases, unit="case"):
                 idx = future_to_idx[future]
                 try:
                     result = future.result()
-                    # 如果返回结果包含 Error 字样，打印出来 (可选)
                     if "Error" in result:
                         print(f"\n[Warning] {result}")
                 except Exception as exc:
-                    print(f"\n[Critical Error] Case {idx} generated an exception: {exc}")
+                    print(f"\n[Critical Error] Case {idx}: {exc}")
 
     print("\nAll processing tasks finished!")
 

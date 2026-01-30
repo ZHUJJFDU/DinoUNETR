@@ -18,7 +18,7 @@ import copy
 from dino_unetr.MED_DINO_UNETR_distance import MED_DINO_UNETR_Distance
 
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
-from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_conv_adapter
+from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_conv_adapter, inject_mdt_adapter
 from toolkit import compute_pca_projection
 
 class GDPDistanceLightningModel(pl.LightningModule):
@@ -69,7 +69,18 @@ class GDPDistanceLightningModel(pl.LightningModule):
             
             # Similar to LoRA, ensure new components are trainable
             for name, param in self.model.named_parameters():
-                 if any(x in name for x in ["decoder", "head", "geo_encoder", "fusion_layer"]):
+                if any(x in name for x in ["decoder", "head", "geo_encoder", "fusion_layer"]):
+                    param.requires_grad = True
+
+        elif self.strategy == 'mdt':
+            print(">>> Strategy: MDT Adapter Enabled (Applied to Backbone).")
+            reduction = cfig.get('mdt_reduction', 4)
+            inject_mdt_adapter(self.model, reduction=reduction)
+            
+            # BUT, inject_mdt_adapter doesn't know about 'geo_encoder' and 'fusion_layer'.
+            # So we must manually unfreeze them.
+            for name, param in self.model.named_parameters():
+                 if any(x in name for x in ["geo_encoder", "fusion_layer"]):
                     param.requires_grad = True
                     
         elif self.strategy == 'llrd':

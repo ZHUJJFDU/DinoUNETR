@@ -37,6 +37,5 @@ scale_out: 7.5
 
 
 model_from_lightning: True
-#save_model_path: ./trained_model/top_valid_model_1.pth
-save_model_path: trained_models\trained_model_default_256_meddino_changechannel_nah&lung\best_model-epoch=112-train_loss=0.0532.ckpt
-save_pred_path: results\result_default_256_meddino_changechannel_nah&lung
+save_model_path: trained_models\trained_model_default_256_meddino_literation_nah&lung\best_model-epoch=148-train_loss=0.1560.ckpt
+save_pred_path: results\result_default_256_meddino_literation_nah&lung
