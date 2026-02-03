@@ -72,22 +72,6 @@ class ProcessedSliceDataset(Dataset):
             
             # 4. Random Flip
             # Modified: Removed spatial_axis=2 (Z-flip) as it's anatomically incorrect for 3D volumes (head-feet flip)
-            # But for 2D slices (H, W), axis 0 is H (Ant-Post/Left-Right depends on view), axis 1 is W.
-            # Assuming H=Ant-Post, W=Left-Right. Flipping Left-Right (W, axis 1) is valid data augmentation (mirroring).
-            # Flipping Ant-Post (H, axis 0) might be weird?
-            # User said "Removing spatial_axis=2". Slice data is (C, H, W). Dimensions are 1, 2. (0 is channel).
-            # MONAI RandFlipd spatial_axis refers to spatial dims index.
-            # If 2D, spatial_axis=0 is H, spatial_axis=1 is W.
-            # User's request about "Z axis" implies they thought of 3D data.
-            # In 2D slice loader:
-            # We are likely looking at Axial slices. H=AP, W=LR.
-            # Rotations are in-plane.
-            # Flip axis 1 (LR) is standard.
-            # Flip axis 0 (AP) is non-standard (changing patient from supine to prone?).
-            # I will keep axis 0 and 1 relative to the SLICE if that was the original intent for "3 axes probability 0.4".
-            # The original toolkit had axis 0, 1, 2 for 3D.
-            # For 2D, we only have 0 and 1.
-            # I'll keep both for now unless "spatial_axis=2" was the ONLY objection.
             RandFlipd(keys=self.keys, prob=0.4, spatial_axis=0, allow_missing_keys=True),
             RandFlipd(keys=self.keys, prob=0.4, spatial_axis=1, allow_missing_keys=True),
             
@@ -200,19 +184,9 @@ class GetLoader(object):
         super().__init__()
         self.cfig = cfig
         
-        # Updated to point to Dataset_512
-        # Use absolute path or relative? Original was 'Dataset_256'
-        # User updated run_process.py to save to D:/data/Dataset_512 
-        # But let's check if user wants absolute path.
-        # User's run_process.py change: 'D:/data/Dataset_512/Train'
-        # If running locally, we should probably stick to what exists or what user specified.
-        # Assuming the generated data is where the user put it. 
-        # **Crucial**: The user modified run_process.py to save to `D:/data/Dataset_512`.
-        # So we should look there.
-        
-        self.train_root = 'D:/data/Dataset_512/Train'
-        self.valid_root = 'D:/data/Dataset_512/Valid'
-        self.test_root = 'D:/data/Dataset_512/Test'
+        self.train_root = 'Dataset_256_layout_changechannel_nah&lung/Train'
+        self.valid_root = 'Dataset_256_layout_changechannel_nah&lung/Valid'
+        self.test_root = 'Dataset_256_layout_changechannel_nah&lung/Test'
         
     def train_dataloader(self):
         # 直接实例化新的 Dataset

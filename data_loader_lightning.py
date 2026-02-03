@@ -129,7 +129,6 @@ class MyDataset(Dataset):
             In_dict['comb_optptv'],  
             In_dict['comb_oar_priority'],  
             In_dict['beam_plate_norm'],
-            In_dict['comb_oar_distance'], 
             In_dict['Body']), axis=0)
 
         data_dict['Body'] = In_dict['Body']

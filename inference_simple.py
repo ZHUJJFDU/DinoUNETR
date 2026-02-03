@@ -8,6 +8,9 @@ import sys
 import pandas as pd
 from tqdm import tqdm
 from torch.utils.data import Dataset, DataLoader
+import monai
+# 将报错的这个类加入安全白名单
+torch.serialization.add_safe_globals([monai.utils.enums.TraceKeys])
 
 # Ensure current dir is in path
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -86,7 +89,7 @@ class SimpleDataset(Dataset):
             In_dict['comb_optptv'],  
             In_dict['comb_oar_priority'],  
             In_dict['beam_plate_norm'],
-            In_dict['comb_oar_distance'], 
+            # In_dict['comb_oar_distance'], 
             In_dict['Body']
         ), dim=0) # [6, D, H, W]
         
@@ -142,7 +145,8 @@ def inference_simple():
             checkpoint_path, 
             cfig=cfig, 
             strategy=cfig.get('strategy', 'default'),
-            strict=False 
+            strict=False,
+            weights_only=False 
         )
     except Exception as e:
         print(f"Error loading model: {e}")

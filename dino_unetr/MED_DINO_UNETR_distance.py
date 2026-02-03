@@ -105,7 +105,7 @@ class GeometryEncoder(nn.Module):
     A lightweight CNN encoder for distance/geometric maps.
     Downsamples from (B, 3, H, W) to (B, embed_dim, H/16, W/16).
     """
-    def __init__(self, input_dim=3, embed_dim=768):
+    def __init__(self, input_dim=1, embed_dim=768):
         super().__init__()
         
         self.stem = nn.Sequential(

@@ -79,7 +79,7 @@ class ProcessDataset(MyDataset):
                 In_dict['comb_optptv'],  
                 In_dict['comb_oar_priority'],  
                 In_dict['beam_plate_norm'],
-                In_dict['comb_oar_distance'], 
+                # In_dict['comb_oar_distance'], # REMOVED for 5-input experiment
                 In_dict['Body']
             ), axis=0)
         except KeyError as e:
@@ -167,9 +167,9 @@ def main():
 
     # 任务列表
     tasks = [
-        ('D:/data/Dataset_512/Train', 'train', 'train'),
-        ('D:/data/Dataset_512/Valid', 'train', 'valid'),
-        ('D:/data/Dataset_512/Test',  'valid', 'test')
+        ('Dataset_128160_layout_changechannel_nah&lung/Train', 'train', 'train'),
+        ('Dataset_128160_layout_changechannel_nah&lung/Valid', 'train', 'valid'),
+        ('Dataset_128160_layout_changechannel_nah&lung/Test',  'valid', 'test')
     ]
 
     for task_idx, (save_dir, phase, dev_split) in enumerate(tasks):
