@@ -41,46 +41,45 @@ class ProcessedSliceDataset(Dataset):
 
         # --- Transforms Setup ---
         self.out_size = cfig.get('out_size', [96, 256, 256]) # [D, H, W] but dataset is [H, W] usually
-        # Note: cfig['out_size'] is typically [96, 256, 256] from config
-        # But our 2D slice data is (C, H, W). We only crop H and W. 
         self.target_h = self.out_size[1]
         self.target_w = self.out_size[2]
         
-        self.keys = ['data', 'label', 'body', 'ptv', 'oar_serial', 'oar_parallel']
+        self.keys = ['data', 'label', 'body']
         
         target_size = [self.target_h, self.target_w]
-        resize_size = [int(self.target_h * 1.2), int(self.target_w * 1.2)]
-        min_crop_size = [int(self.target_h * 0.85), int(self.target_w * 0.85)]
+        modes = ['bilinear', 'bilinear', 'nearest']
         
         self.train_transforms = Compose([
-            # 1. Resize to 1.2x target size (Downsample from 512 if input is 512, or Upsample if 256)
-            Resized(keys=self.keys, spatial_size=resize_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True),
-            
-            # 2. Random Crop (0.85x to 1.2x)
-            RandSpatialCropd(
+            # 1. 【核心修正】先 Resize 到一个略大的尺寸，或者直接 Resize 到 target
+            # 既然要做 Global，先统一尺寸，方便后续处理
+            Resized(
                 keys=self.keys, 
-                roi_size=min_crop_size, 
-                max_roi_size=resize_size, 
-                random_center=True, 
-                random_size=True, 
-                allow_missing_keys=True
+                spatial_size=target_size, # (256, 256)
+                mode=modes
             ),
-            
-            # 3. Random Rotate
-            # Modified: range_x=0.2 (~11 degrees) to be physically realistic
-            RandRotated(keys=self.keys, prob=0.8, range_x=0.2, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], padding_mode='zeros', allow_missing_keys=True),
-            
-            # 4. Random Flip
-            # Modified: Removed spatial_axis=2 (Z-flip) as it's anatomically incorrect for 3D volumes (head-feet flip)
-            RandFlipd(keys=self.keys, prob=0.4, spatial_axis=0, allow_missing_keys=True),
-            RandFlipd(keys=self.keys, prob=0.4, spatial_axis=1, allow_missing_keys=True),
-            
-            # 5. Restore to target size
-            Resized(keys=self.keys, spatial_size=target_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True)
+            # 2. 随机仿射变换 (替代原来的 Crop 和 Rotate)
+            # RandAffined 可以同时做：旋转、缩放(Zoom)、平移
+            RandAffined(
+                keys=self.keys,
+                prob=0.5,
+                rotate_range=np.pi/12,      # 旋转 ±15度 (0.2 rad 约 11度，也可以)
+                scale_range=(0.1, 0.1),     # 缩放 ±10% (0.9 ~ 1.1) -> 替代了你的 Crop
+                translate_range=(10, 10),   # 平移 ±10个像素 -> 模拟中心偏移
+                mode=modes,
+                padding_mode='border',      # 【推荐】用边缘像素填充，避免旋转产生黑边导致剂量计算错误
+                cache_grid=True
+            ),
+
+            # 3. 左右翻转 (只保留左右)
+            RandFlipd(
+                keys=self.keys, 
+                prob=0.5,           # 可以提高到 0.5
+                spatial_axis=1      # 1 代表宽度方向 (Left-Right)，千万别用 0
+            ),
         ])
         
         self.val_transforms = Compose([
-             Resized(keys=self.keys, spatial_size=target_size, mode=['bilinear', 'nearest', 'nearest', 'nearest', 'nearest', 'nearest'], allow_missing_keys=True)
+             Resized(keys=self.keys, spatial_size=target_size, mode=modes, allow_missing_keys=True)
         ])
 
 

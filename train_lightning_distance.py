@@ -10,15 +10,10 @@ import argparse
 import os
 import time
 import data_loader_lightning_slice
-import optuna
-from optuna.integration import PyTorchLightningPruningCallback
 import copy
-
-# Importing the new distance model
 from dino_unetr.MED_DINO_UNETR_distance import MED_DINO_UNETR_Distance
-
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
-from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_conv_adapter, inject_mdt_adapter
+from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_mdt_adapter
 from toolkit import compute_pca_projection
 
 class GDPDistanceLightningModel(pl.LightningModule):
@@ -54,23 +49,12 @@ class GDPDistanceLightningModel(pl.LightningModule):
             # Inject LoRA into the DINO backbone
             lora_rank = cfig.get('lora_rank', 8)
             lora_alpha = cfig.get('lora_alpha', 8)
-            inject_lora(self.model.backbone.model, rank=lora_rank, alpha=lora_alpha)
+            inject_lora(self.model, rank=lora_rank, alpha=lora_alpha)
             
             for name, param in self.model.named_parameters():
                 if any(x in name for x in ["lora_", "decoder", "head", "geo_encoder", "fusion_layer"]):
                     param.requires_grad = True
         
-        elif self.strategy == 'adapter':
-            print(">>> Strategy: Conv-Adapter Enabled (Applied to Backbone).")
-            bottleneck_dim = cfig.get('adapter_bottleneck', 64)
-            kernel_size = cfig.get('adapter_kernel_size', 3)
-            # Inject adapter into backbone
-            inject_conv_adapter(self.model.backbone.model, bottleneck_dim=bottleneck_dim, kernel_size=kernel_size)
-            
-            # Similar to LoRA, ensure new components are trainable
-            for name, param in self.model.named_parameters():
-                if any(x in name for x in ["decoder", "head", "geo_encoder", "fusion_layer"]):
-                    param.requires_grad = True
 
         elif self.strategy == 'mdt':
             print(">>> Strategy: MDT Adapter Enabled (Applied to Backbone).")
@@ -224,7 +208,7 @@ class GDPDistanceLightningModel(pl.LightningModule):
             # Use LLRD parameter grouping
             # Note: Need to adjust get_llrd_params to handle the new geometry encoder if we want LLRD on it.
             # For now, simplistic LLRD on backbone + everything else as last group
-            params = get_llrd_params(self.model.backbone.model, base_lr=self.lr, weight_decay=1e-4, decay_rate=0.9)
+            params = get_llrd_params(self.model, base_lr=self.lr, weight_decay=1e-4, decay_rate=0.9)
             
             # Add other parameters (Geo Encoder, Decoder, etc)
             # This is a simplification; ideally 'get_llrd_params' should be aware of the whole structure.
@@ -239,156 +223,71 @@ class GDPDistanceLightningModel(pl.LightningModule):
                      'interval': 'epoch', 'frequency': 1}
         return [optimizer], [scheduler]
 
-def objective(trial, args, base_cfig):
-    # 1. Hyperparameter Suggestion
-    lr = trial.suggest_float("lr", 1e-5, 1e-2, log=True)
-    # Update config (deep copy to avoid side effects)
-    cfig = copy.deepcopy(base_cfig)
-    cfig['lr'] = lr
-    
-    # Conditional Hyperparameters based on strategy
-    strategy = cfig.get('strategy', 'default')
-    
-    if strategy == 'lora':
-        lora_rank = trial.suggest_categorical("lora_rank", [4, 8, 16, 32])
-        lora_alpha = trial.suggest_categorical("lora_alpha", [8, 16])
-        cfig['lora_rank'] = lora_rank
-        cfig['lora_alpha'] = lora_alpha
-        
-    elif strategy == 'adapter':
-        bottleneck = trial.suggest_categorical("adapter_bottleneck", [32, 64, 128])
-        cfig['adapter_bottleneck'] = bottleneck
-        
-    elif strategy == 'llrd':
-        # Suggest decay rate
-        decay = trial.suggest_float("llrd_decay", 0.65, 0.95)
-        # We might need to handle passing this to the model or optimization, 
-        # normally this requires updating how configure_optimizers uses it.
-        # For now, let's assume standard params are fine or just tune LR.
-        pass
 
-    # 2. Model & Data
-    loaders = data_loader_lightning_slice.GetLoader(cfig=cfig['loader_params'])
-    train_loader = loaders.train_dataloader()
-    val_loader = loaders.test_dataloader()
-    
-    model = GDPDistanceLightningModel(cfig)
-
-    # 3. Trainer with Pruning Callback
-    accelerator = "gpu" if torch.cuda.is_available() else "cpu"
-    
-    pruning_callback = PyTorchLightningPruningCallback(trial, monitor="val_loss")
-    
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=cfig['save_model_root'],
-        filename=f'trial_{trial.number}_best',
-        monitor='val_loss',
-        mode='min',
-        save_top_k=1
-    )
-    
-    trainer = pl.Trainer(
-        max_epochs=cfig.get('tuning_epochs', 10), # Fewer epochs for tuning by default or use full?
-        # Let's use a smaller number for tuning efficiency if not specified, or just use cfig['num_epochs']
-        # But usually random search needs speed. Let's stick to cfig['num_epochs'] but rely on pruning.
-        # Actually, let's enable early stopping as well if needed.
-        devices=1,
-        accelerator=accelerator,
-        enable_checkpointing=True,
-        logger=False, # Disable massive logging during tuning
-        callbacks=[pruning_callback, checkpoint_callback],
-        precision='16-mixed'
-    )
-    
-    trainer.fit(model, train_loader, val_loader)
-    
-    return trainer.callback_metrics["val_loss"].item()
-
-def run_tuning(args, cfig):
-    print(">>> Starting Optuna Hyperparameter Tuning...")
-    study = optuna.create_study(direction="minimize", pruner=optuna.pruners.MedianPruner())
-    
-    # Optimize
-    study.optimize(lambda trial: objective(trial, args, cfig), n_trials=20)
-    
-    print("Number of finished trials: {}".format(len(study.trials)))
-    print("Best trial:")
-    trial = study.best_trial
-    
-    print("  Value: {}".format(trial.value))
-    print("  Params: ")
-    for key, value in trial.params.items():
-        print("    {}: {}".format(key, value))
-        
-    # Optional: Save best params to a yaml?
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='Train MED_DINO_UNETR_Distance')
-    parser.add_argument('cfig_path', type=str, default='config_files\config_DinoUnetr.yaml')
+    parser.add_argument('cfig_path', type=str, nargs='?',default='config_files\config_DinoUnetr.yaml')
     parser.add_argument('--ckpt_path', default=None, type=str, help='Path to checkpoint to resume training from')
-    parser.add_argument('--tune', action='store_true', help='Run Optuna hyperparameter tuning')
     args = parser.parse_args()
 
     cfig = yaml.load(open(args.cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
 
-    if args.tune:
-        run_tuning(args, cfig)
+    # Standard Training Logic
+    # Data Loaders
+    loaders = data_loader_lightning_slice.GetLoader(cfig=cfig['loader_params'])
+    train_loader = loaders.train_dataloader()
+    val_loader = loaders.test_dataloader()
+
+    # Model
+    model = GDPDistanceLightningModel(cfig) 
+
+    accelerator = "gpu" if torch.cuda.is_available() else "cpu"   
+    if torch.cuda.device_count() > 1:
+        stratgy = 'ddp_find_unused_parameters_true'
+        sync_batchnorm = True
+        use_distributed_sampler = True
     else:
-        # Standard Training Logic
-        # Data Loaders
-        loaders = data_loader_lightning_slice.GetLoader(cfig=cfig['loader_params'])
-        train_loader = loaders.train_dataloader()
-        val_loader = loaders.test_dataloader()
+        stratgy = 'auto' 
+        sync_batchnorm = False
+        use_distributed_sampler = False
 
-        # Model
-        model = GDPDistanceLightningModel(cfig) 
+    # Callbacks
+    lr_monitor = LearningRateMonitor(logging_interval='step')
+    checkpoint_callback_train = ModelCheckpoint(
+        dirpath=cfig['save_model_root'],
+        filename='dinounetr-best-train-{epoch:02d}-{train_loss:.4f}',
+        save_top_k=1,
+        monitor='train_loss',
+        mode='min'
+    )
 
-        accelerator = "gpu" if torch.cuda.is_available() else "cpu"   
-        if torch.cuda.device_count() > 1:
-            stratgy = 'ddp_find_unused_parameters_true'
-            sync_batchnorm = True
-            use_distributed_sampler = True
-        else:
-            stratgy = 'auto' 
-            sync_batchnorm = False
-            use_distributed_sampler = False
+    checkpoint_callback_val = ModelCheckpoint(
+        dirpath=cfig['save_model_root'],
+        filename='dinounetr-best-val-{epoch:02d}-{val_loss:.4f}',
+        save_top_k=1,
+        monitor='val_loss',
+        mode='min'
+    )
+    
+    # TensorBoard Logger
+    # Using a different name to separate from main logs
+    tb_logger = TensorBoardLogger(save_dir=cfig['save_model_root'], name="tensorboard_logs_distance")
 
-        # Callbacks
-        lr_monitor = LearningRateMonitor(logging_interval='step')
-        checkpoint_callback_train = ModelCheckpoint(
-            dirpath=cfig['save_model_root'],
-            filename='dinounetr-best-train-{epoch:02d}-{train_loss:.4f}',
-            save_top_k=1,
-            monitor='train_loss',
-            mode='min'
-        )
+    # Trainer
+    trainer = pl.Trainer(
+        max_epochs=cfig['num_epochs'],
+        devices = 'auto', 
+        accelerator=accelerator, 
+        strategy=stratgy, 
+        sync_batchnorm=sync_batchnorm,
+        use_distributed_sampler=use_distributed_sampler, 
+        logger=tb_logger, 
+        default_root_dir=cfig['save_model_root'],
+        callbacks=[lr_monitor, checkpoint_callback_train, checkpoint_callback_val],
+        precision='16-mixed'
+    )
 
-        checkpoint_callback_val = ModelCheckpoint(
-            dirpath=cfig['save_model_root'],
-            filename='dinounetr-best-val-{epoch:02d}-{val_loss:.4f}',
-            save_top_k=1,
-            monitor='val_loss',
-            mode='min'
-        )
-        
-        # TensorBoard Logger
-        # Using a different name to separate from main logs
-        tb_logger = TensorBoardLogger(save_dir=cfig['save_model_root'], name="tensorboard_logs_distance")
-
-        # Trainer
-        trainer = pl.Trainer(
-            max_epochs=cfig['num_epochs'],
-            devices = 'auto', 
-            accelerator=accelerator, 
-            strategy=stratgy, 
-            sync_batchnorm=sync_batchnorm,
-            use_distributed_sampler=use_distributed_sampler, 
-            logger=tb_logger, 
-            default_root_dir=cfig['save_model_root'],
-            callbacks=[lr_monitor, checkpoint_callback_train, checkpoint_callback_val],
-            precision='16-mixed'
-        )
-
-        # Training
-        trainer.fit(model, train_loader, val_loader, ckpt_path=args.ckpt_path)
+    # Training
+    trainer.fit(model, train_loader, val_loader, ckpt_path=args.ckpt_path)

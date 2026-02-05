@@ -89,7 +89,7 @@ class SimpleDataset(Dataset):
             In_dict['comb_optptv'],  
             In_dict['comb_oar_priority'],  
             In_dict['beam_plate_norm'],
-            # In_dict['comb_oar_distance'], 
+            In_dict['comb_oar_distance'], 
             In_dict['Body']
         ), dim=0) # [6, D, H, W]
         
