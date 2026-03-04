@@ -39,7 +39,7 @@ def parse_metrics(file_path, output_csv):
 
 if __name__ == "__main__":
     # Define paths
-    input_file = r"C:\Users\960\Desktop\baseline\results\baseline_nah&lung\metrics.txt"
-    output_file = r"C:\Users\960\Desktop\baseline\results\baseline_nah&lung\metrics.csv"
+    input_file = r"C:\Users\960\Desktop\compare\PRUnet\results\result_256_prunet\metrics.txt"
+    output_file = r"C:\Users\960\Desktop\compare\PRUnet\results\result_256_prunet\metrics.csv"
     
     parse_metrics(input_file, output_file)

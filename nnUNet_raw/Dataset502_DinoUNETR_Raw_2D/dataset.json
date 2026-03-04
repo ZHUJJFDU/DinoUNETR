@@ -1,0 +1,20 @@
+{
+    "channel_names": {
+        "0": "mass_density",
+        "1": "comb_optptv",
+        "2": "comb_oar_priority",
+        "3": "beam_plate_norm",
+        "4": "comb_oar_distance",
+        "5": "Body"
+    },
+    "labels": {
+        "background": 0,
+        "Target": 1
+    },
+    "numTraining": 0,
+    "file_ending": ".nii.gz",
+    "name": "DinoUNETR_Raw_2D",
+    "reference": "DinoUNETR Raw Conversion",
+    "release": "1.0",
+    "description": "7 Channels Raw -> nnU-Net. Label is Dose."
+}

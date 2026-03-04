@@ -21,7 +21,7 @@ loader_params:
     'CatStructures': False
     'dose_div_factor': 10 
     
-strategy: 'lora' # Options: lora, llrd, frozen, adapter, default
+strategy: 'default' # Options: lora, llrd, frozen, adapter, default
 layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
 use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
 
@@ -37,5 +37,5 @@ scale_out: 7.5
 
 
 model_from_lightning: True
-save_model_path: trained_models\trained_model_lora_256_meddino_changechannel_nah&lung\dinounetr-best-val-epoch=72-val_loss=0.2088.ckpt
-save_pred_path: results\result_lora_256_meddino_changechannel_nah&lung
+save_model_path: trained_models\trained_model_default_256_meddino_distance_nah&lung\dinounetr-best-val-epoch=146-val_loss=0.1808.ckpt
+save_pred_path: results\result_default_256_meddino_distance_nah&lung

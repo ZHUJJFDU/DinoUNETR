@@ -2,140 +2,13 @@ import os
 import sys
 import torch
 import torch.nn as nn
-import numpy as np
-import json
+
 # Ensure we can import from the local dinov3 package
 current_dir = os.path.dirname(os.path.abspath(__file__))
+if current_dir not in sys.path:
+    sys.path.append(current_dir)
 
 from dinov3.models.vision_transformer import vit_base
-
-
-class LayoutAdapter(nn.Module):
-    def __init__(self, feature_dim=768, layout_dim=768, num_heads=8):
-        super().__init__()
-        # 1. Pre-Norm
-        self.norm = nn.LayerNorm(feature_dim)
-        
-        # 2. Cross-Attention
-        self.attn = nn.MultiheadAttention(
-            embed_dim=feature_dim, 
-            num_heads=num_heads, 
-            kdim=layout_dim, 
-            vdim=layout_dim,
-            batch_first=True
-        )
-        
-        # 3. Gating Parameter (Zero Init)
-        self.gamma = nn.Parameter(torch.zeros(1))
-
-    def forward(self, feature, layout):
-        """
-        :param feature: [batch_size, feature_dim, H, W]
-        :param layout: [batch_size, seq_len, layout_dim]
-        :return: [batch_size, feature_dim, H, W]
-        """
-        B, C, H, W = feature.shape
-
-        # (B, C, H, W) -> (B, H*W, C)
-        x = feature.flatten(2).transpose(1, 2)
-
-        # 1. Norm (Query)
-        x_norm = self.norm(x)
-        
-        # 2. Cross-Attention (Query=Image, Key/Value=Layout)
-        attn_out, _ = self.attn(
-            query=x_norm,
-            key=layout,
-            value=layout
-        )
-        
-        # 3. Gated Residual
-        x = x + self.gamma * attn_out
-        
-        # 4. Reshape
-        x = x.transpose(1, 2).view(B, C, H, W)
-        return x
-
-class LayoutEmbedding(nn.Module):
-    def __init__(self, embed_dim=768, num_angle_samples=36):
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.num_angle_samples = num_angle_samples
-
-        input_scalar_dim = 6
-        self.scalar_mlp = nn.Sequential(
-            nn.Linear(input_scalar_dim, 128),
-            nn.LayerNorm(128),
-            nn.GELU(),
-            nn.Linear(128, embed_dim)
-        )
-
-        input_angle_dim = num_angle_samples * 2
-        self.angle_mlp = nn.Sequential(
-            nn.Linear(input_angle_dim, 256),
-            nn.LayerNorm(256),
-            nn.GELU(),
-            nn.Linear(256, embed_dim)
-        )
-
-    def _process_angles(self, batch_angle_lists):
-        """
-        Convert angle list to sine/cosine encoding
-        :param batch_angle_lists: List[List[float]] or List[JSON string]
-        :return: [batch_size, num_angle_samples * 2]
-        """
-        batch_feats = []
-        for angles in batch_angle_lists:
-            # Parse JSON if needed
-            if isinstance(angles, str):
-                angles = json.loads(angles)
-
-            # Convert to numpy
-            arr = np.array(angles, dtype=np.float32)
-
-            if len(arr) == 0:
-                resampled = np.zeros(self.num_angle_samples)
-            else:
-                # Interpolate to fixed length
-                if len(arr) == 1:
-                    resampled = np.full(self.num_angle_samples, arr[0])
-                else:
-                    old = np.linspace(0, 1, len(arr))
-                    new = np.linspace(0, 1, self.num_angle_samples)
-                    resampled = np.interp(new, old, arr)
-            
-            # To radians
-            rads = np.deg2rad(resampled)
-            sin_angles = np.sin(rads)
-            cos_angles = np.cos(rads)
-
-            # Flatten -> (num_angle_samples * 2,)
-            feats = np.stack([sin_angles, cos_angles], axis=1).flatten()
-            batch_feats.append(feats)
-
-        # Return Tensor
-        return torch.tensor(np.array(batch_feats), dtype=torch.float32)
-    
-    def forward(self, data):
-        """
-        :param data: Dict containing 'spacing', 'isocenter', 'angle_list'
-        :return: [batch_size, 2, embed_dim]
-        """
-        space = data['spacing'] # (B, 3)
-        isocenter = data['isocenter'] # (B, 3)
-        angle_list = data['angle_list'] # List[List]
-        
-        # 1. Scalar Token
-        scalar_input = torch.cat([space, isocenter], dim=1) # (B, 6)
-        scalar_token = self.scalar_mlp(scalar_input).unsqueeze(1) # (B, 1, 768)
-
-        # 2. Angle Token
-        angle_input = self._process_angles(angle_list).to(space.device) # (B, 72)
-        angle_token = self.angle_mlp(angle_input).unsqueeze(1) # (B, 1, 768)
-
-        # 3. Combine
-        layout_tokens = torch.cat([scalar_token, angle_token], dim=1) # (B, 2, 768)
-        return layout_tokens
 
 # --- Backbone Adapter ---
 class MedDINOv3Backbone(nn.Module):
@@ -171,23 +44,27 @@ class MedDINOv3Backbone(nn.Module):
                 else:
                     state_dict = chkpt
                 
-                # Filter incompatible keys and remove prefixes
+                # Filter out incompatible keys (like ibot head) and remove prefixes
                 new_state_dict = {}
                 for k, v in state_dict.items():
                     if 'ibot' in k or 'dino_head' in k:
                         continue
+                    # Remove 'backbone.' prefix if present
                     new_key = k.replace('backbone.', '')
                     new_state_dict[new_key] = v
                 
-                # Load weights
+                # Load weights (strict=False to allow for some mismatch, e.g. pos_embed resizing if needed)
                 missing, unexpected = self.model.load_state_dict(new_state_dict, strict=False)
-                print(f"Weights loaded. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
+                print(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
+                if len(missing) > 0:
+                    print(f"First few missing: {missing[:5]}")
             except Exception as e:
                 print(f"Error loading weights: {e}")
         else:
-            print(f"Warning: Checkpoint {checkpoint_path} not found. Using random init.")
+            print(f"Warning: Checkpoint {checkpoint_path} not found. Using random initialization.")
 
     def adapt_channels(self, input_dim):
+        # print(f"Adapting first layer from 3 to {input_dim} channels...")
         patch_embed_layer = self.model.patch_embed.proj
         
         original_weights = patch_embed_layer.weight.data
@@ -283,19 +160,89 @@ class Deconv2DBlock(nn.Module):
     def forward(self, x):
         return self.block(x)
 
+# --- EPA Module (UNETR++) ---
+class EPA(nn.Module):
+    def __init__(self, input_dim, channel_attention_reduce=16):
+        super().__init__()
+        self.input_dim = input_dim
+        self.norm = nn.GroupNorm(8, input_dim)
+        # Shared 1x1 convolutions for Query and Key
+        self.conv_q = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        self.conv_k = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        
+        # Independent 1x1 convolutions for Value
+        self.conv_v_spatial = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        self.conv_v_channel = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        
+        # Channel Attention Output projection
+        self.channel_out = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        
+        # Spatial Attention Output projection
+        self.spatial_out = nn.Conv2d(input_dim, input_dim, kernel_size=1)
+        
+        # Fusion
+        self.gamma = nn.Parameter(torch.zeros(1))
+        self.beta = nn.Parameter(torch.zeros(1))
+        
+    def forward(self, x):
+        b, c, h, w = x.shape
+        x = self.norm(x)
+        # Shared Q, K
+        q = self.conv_q(x) # B, C, H, W
+        k = self.conv_k(x) # B, C, H, W
+        
+        # --- Channel Attention Branch (Q^T * K) ---
+        # Reshape to (B, C, N) where N = H*W
+        # Cast to float32 for numerical stability in mixed precision training
+        q_c = q.view(b, c, -1).float()     # B, C, N
+        k_c = k.view(b, c, -1).float()     # B, C, N
+        
+        # Attention map: (B, C, C)
+        attn_c = torch.bmm(q_c, k_c.transpose(1, 2)) 
+        # Stability: Scale and Clamp
+        # 通道注意力的缩放应基于通道数 C，而不是空间分辨率 H*W
+        attn_c = attn_c / (c ** 0.5 + 1e-6)
+        
+        attn_c = torch.softmax(attn_c, dim=-1)
+        
+        v_c = self.conv_v_channel(x).view(b, c, -1).float() # B, C, N
+        
+        # Apply attention: (B, C, C) @ (B, C, N) -> (B, C, N)
+        out_c = torch.bmm(attn_c, v_c) 
+        out_c = out_c.view(b, c, h, w).type_as(x)
+        out_c = self.channel_out(out_c)
+        
+        # --- Spatial Attention Branch (Linear Efficient Attention) ---
+        # Cast to float32
+        q_s = q.view(b, c, -1).permute(0, 2, 1).float() # B, N, C
+        k_s = k.view(b, c, -1).permute(0, 2, 1).float() # B, N, C
+        v_s = self.conv_v_spatial(x).view(b, c, -1).permute(0, 2, 1).float() # B, N, C
+        
+        # Stability: Add eps
+        q_s = torch.softmax(q_s, dim=-1) 
+        k_s = torch.softmax(k_s, dim=-2) # Softmax over N (spatial)
+        
+        # Context: K^T (C, N) * V (N, C) -> (C, C) (Actually (B, C, C))
+        context_s = torch.bmm(k_s.transpose(1, 2), v_s) 
+        
+        # Out: Q (N, C) * Context (C, C) -> (N, C)
+        out_s = torch.bmm(q_s, context_s) 
+        
+        out_s = out_s.permute(0, 2, 1).contiguous().view(b, c, h, w).type_as(x)
+        out_s = self.spatial_out(out_s)
+        
+        # Stability: Clamp the output of attention before residual addition to avoid unexpected large values
+        # out_c = torch.clamp(out_c, min=-100, max=100)
+        # out_s = torch.clamp(out_s, min=-100, max=100)
+        
+        return self.gamma * out_c + self.beta * out_s + x
+
 # --- Main Model ---
 class MED_DINO_UNETR(nn.Module):
     def __init__(self, checkpoint_path, embed_dim=768, input_dim=6, output_dim=1):
         super().__init__()
         # 1. Use the new MedDINOv3 Backbone
         self.backbone = MedDINOv3Backbone(checkpoint_path, input_dim)
-
-        self.layout_embedder = LayoutEmbedding(embed_dim=embed_dim)
-
-        self.adapter3 = LayoutAdapter(feature_dim=embed_dim)
-        self.adapter6 = LayoutAdapter(feature_dim=embed_dim)
-        self.adapter9 = LayoutAdapter(feature_dim=embed_dim)
-        self.adapter12 = LayoutAdapter(feature_dim=embed_dim)
 
         # 2. U-Net Decoder (Same as before)
         self.decoder0 = nn.Sequential(
@@ -320,17 +267,24 @@ class MED_DINO_UNETR(nn.Module):
 
         self.decoder9_upsampler = nn.Sequential(
             Conv2DBlock(1024, 512),
+            EPA(512),
             Conv2DBlock(512, 512),
             Conv2DBlock(512, 512),
             SingleDeconv2DBlock(512, 256),
         )
 
         self.decoder6_upsampler = nn.Sequential(
-            Conv2DBlock(512, 256), Conv2DBlock(256, 256), SingleDeconv2DBlock(256, 128)
+            Conv2DBlock(512, 256),
+            EPA(256),
+            Conv2DBlock(256, 256),
+            SingleDeconv2DBlock(256, 128)
         )
 
         self.decoder3_upsampler = nn.Sequential(
-            Conv2DBlock(256, 128), Conv2DBlock(128, 128), SingleDeconv2DBlock(128, 64)
+            Conv2DBlock(256, 128),
+            EPA(128),
+            Conv2DBlock(128, 128),
+            SingleDeconv2DBlock(128, 64)
         )
 
         self.head = nn.Sequential(
@@ -344,50 +298,38 @@ class MED_DINO_UNETR(nn.Module):
             nn.Softplus()
         )
     
-    def forward(self, x, data):
+    def forward(self, x):
         features = self.backbone(x)
         f0, f3, f6, f9, f12 = x, features[0], features[1], features[2], features[3] # 1,768,16,16
         
-        layout_tokens = self.layout_embedder(data)
-
-        f3_layout = self.adapter3(f3, layout_tokens)
-        f6_layout = self.adapter6(f6, layout_tokens)
-        f9_layout = self.adapter9(f9, layout_tokens)
-        f12_layout = self.adapter12(f12, layout_tokens)
-
-        f12 = self.decoder12_upsampler(f12_layout)
-        f9 = self.decoder9(f9_layout)
+        # print(f0.shape, f3.shape, f6.shape, f9.shape, f12.shape)
+        
+        f12 = self.decoder12_upsampler(f12)
+        f9 = self.decoder9(f9)
         f9 = self.decoder9_upsampler(torch.cat([f9, f12], dim=1))
-        f6 = self.decoder6(f6_layout)
+        f6 = self.decoder6(f6)
         f6 = self.decoder6_upsampler(torch.cat([f6, f9], dim=1))
-        f3 = self.decoder3(f3_layout)
+        f3 = self.decoder3(f3)
         f3 = self.decoder3_upsampler(torch.cat([f3, f6], dim=1))
         f0 = self.decoder0(f0)
         output = self.head(torch.cat([f0, f3], dim=1))
         return output, features[1], features[3]
 
 if __name__ == '__main__':
-    # ... (前面的初始化保持不变) ...
+    # Define checkpoint path
+    ckpt_path = r"c:\Users\960\Desktop\DinoUNETR\dino_unetr\model.pth"
+    
+    print(f"Initializing MED_DINO_UNETR with checkpoint: {ckpt_path}")
+    model = MED_DINO_UNETR(checkpoint_path=ckpt_path)
+    print(model)
     
     # Test Forward Pass
     print("\nTesting forward pass...")
     input_tensor = torch.randn(1, 6, 512, 512)
-    
-    # [关键修改] 构造假的 data 字典
-    fake_data = {
-        'spacing': torch.tensor([[1.0, 1.0, 3.0]]),       # (B, 3)
-        'isocenter': torch.tensor([[0.5, 0.5, 0.5]]),     # (B, 3)
-        'angle_list': [[0, 30, 60, 90]]                   # List of lists
-    }
-    
     try:
-        # [关键修改] 传入 fake_data
-        output_tensor, _, _ = model(input_tensor, fake_data)
-        
+        output_tensor,_,_ = model(input_tensor)
         print(f"Input shape: {input_tensor.shape}")
         print(f"Output shape: {output_tensor.shape}")
         print("Test passed!")
     except Exception as e:
         print(f"Test failed: {e}")
-        import traceback
-        traceback.print_exc() # 打印详细报错信息

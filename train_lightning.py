@@ -13,8 +13,9 @@ import data_loader_lightning_slice
 import copy
 from dino_unetr.DINO_UNETR import DINO_UNETR
 from dino_unetr.MED_DINO_UNETR import MED_DINO_UNETR as MED_DINO_UNETR_Basic
-from dino_unetr.MED_DINO_UNETR_layout import MED_DINO_UNETR as MED_DINO_UNETR_Layout
 from dino_unetr.MED_DINO_UNETR_nmODE import MED_DINO_UNETR as MED_DINO_UNETR_nmODE
+from dino_unetr.MED_DINO_UNETR_plus import MED_DINO_UNETR as MED_DINO_UNETR_plus
+from dino_unetr.MED_DINO_UNETR_distance_nmODE import MED_DINO_UNETR_Distance_nmODE
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
 from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_mdt_adapter
 from toolkit import compute_pca_projection
@@ -31,17 +32,17 @@ class GDPLightningModel(pl.LightningModule):
             self.strategy = strategy
         
         # Determine Model Layout
-        self.use_layout = cfig.get('layout', False)
         self.use_nmODE = cfig.get('use_nmODE', False)
+        self.use_plus = cfig.get('use_plus', False)
         
         input_dim = cfig.get('model_params').get('input_channels')
 
-        if self.use_layout:
-            print(f">>> Using MED_DINO_UNETR_Layout (Input Dim: {input_dim})")
-            self.model = MED_DINO_UNETR_Layout(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
-        elif self.use_nmODE:
+        if self.use_nmODE:
             print(f">>> Using MED_DINO_UNETR_nmODE (Input Dim: {input_dim})")
             self.model = MED_DINO_UNETR_nmODE(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
+        elif self.use_plus:
+            print(f">>> Using MED_DINO_UNETR_plus (Input Dim: {input_dim})")
+            self.model = MED_DINO_UNETR_plus(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
         else:
             print(f">>> Using MED_DINO_UNETR_Basic (Input Dim: {input_dim})")
             self.model = MED_DINO_UNETR_Basic(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
@@ -310,7 +311,8 @@ if __name__ == "__main__":
         logger=tb_logger, 
         default_root_dir=cfig['save_model_root'],
         callbacks=[lr_monitor, checkpoint_callback_train, checkpoint_callback_val],
-        precision='16-mixed'
+        precision='16-mixed',
+        gradient_clip_val=1.0
     )
 
     # Training

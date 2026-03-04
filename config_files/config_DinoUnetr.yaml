@@ -28,8 +28,9 @@ model_params:
 strategy: 'default' # Options: lora, llrd, frozen, adapter, default
 layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
 use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
+use_plus: True # True for MED_DINO_UNETR_plus, False for MED_DINO_UNETR
 
-lr: 0.0001
+lr: 0.00002
 
 max_steps: 1000000
 num_epochs: 200 # Will be ignored/overridden if max_steps is used in Trainer, or used as fallback

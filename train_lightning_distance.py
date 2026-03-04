@@ -12,6 +12,7 @@ import time
 import data_loader_lightning_slice
 import copy
 from dino_unetr.MED_DINO_UNETR_distance import MED_DINO_UNETR_Distance
+from dino_unetr.MED_DINO_UNETR_distance_nmODE import MED_DINO_UNETR_Distance_nmODE
 from Loss import L1_DVH_Loss, L1_MSE_Loss, L1_Loss
 from dino_unetr.tuning_utils import inject_lora, get_llrd_params, inject_mdt_adapter
 from toolkit import compute_pca_projection
@@ -38,6 +39,12 @@ class GDPDistanceLightningModel(pl.LightningModule):
         self.lr = float(cfig['lr'])
         self.num_epochs = cfig['num_epochs']
         self.sig_act = nn.Sigmoid()
+
+        self.use_plus = cfig.get('use_plus', False)
+
+        if self.use_plus:
+            print(f">>> Using MED_DINO_UNETR_distance_nmODE (Input Dim: {input_dim})")
+            self.model = MED_DINO_UNETR_distance_nmODE(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
         
         # --- Tuning Strategies ---
         if self.strategy == 'lora':

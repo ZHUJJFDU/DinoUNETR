@@ -5,6 +5,10 @@ Dataset/
 results/
 *.pth
 *.npz
+*.nii.gz
+*.pt
+*.log
+*.gz
 
 # Trained models and logs
 trained_models/

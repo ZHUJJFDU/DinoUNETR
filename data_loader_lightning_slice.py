@@ -44,38 +44,14 @@ class ProcessedSliceDataset(Dataset):
         self.target_h = self.out_size[1]
         self.target_w = self.out_size[2]
         
-        self.keys = ['data', 'label', 'body']
-        
-        target_size = [self.target_h, self.target_w]
-        modes = ['bilinear', 'bilinear', 'nearest']
-        
         self.train_transforms = Compose([
-            # 1. 【核心修正】先 Resize 到一个略大的尺寸，或者直接 Resize 到 target
+            # 1. 先 Resize 到一个略大的尺寸，或者直接 Resize 到 target
             # 既然要做 Global，先统一尺寸，方便后续处理
             Resized(
                 keys=self.keys, 
                 spatial_size=target_size, # (256, 256)
                 mode=modes
-            ),
-            # 2. 随机仿射变换 (替代原来的 Crop 和 Rotate)
-            # RandAffined 可以同时做：旋转、缩放(Zoom)、平移
-            RandAffined(
-                keys=self.keys,
-                prob=0.5,
-                rotate_range=np.pi/12,      # 旋转 ±15度 (0.2 rad 约 11度，也可以)
-                scale_range=(0.1, 0.1),     # 缩放 ±10% (0.9 ~ 1.1) -> 替代了你的 Crop
-                translate_range=(10, 10),   # 平移 ±10个像素 -> 模拟中心偏移
-                mode=modes,
-                padding_mode='border',      # 【推荐】用边缘像素填充，避免旋转产生黑边导致剂量计算错误
-                cache_grid=True
-            ),
-
-            # 3. 左右翻转 (只保留左右)
-            RandFlipd(
-                keys=self.keys, 
-                prob=0.5,           # 可以提高到 0.5
-                spatial_axis=1      # 1 代表宽度方向 (Left-Right)，千万别用 0
-            ),
+            )
         ])
         
         self.val_transforms = Compose([

@@ -1,300 +1,272 @@
 import torch
-import data_loader_lightning
-import yaml
-import argparse 
-import os
-import numpy as np
-import math
-from pathlib import Path
-import matplotlib.pyplot as plt
-from datetime import datetime
-import sys
 import torch.nn.functional as F
+import numpy as np
+import yaml
+import argparse
+import os
+import sys
+import pandas as pd
+from tqdm import tqdm
+from torch.utils.data import Dataset, DataLoader
+import monai
+
+# Add safe globals for potentially unsafe pickle loading (if needed by monai)
+torch.serialization.add_safe_globals([monai.utils.enums.TraceKeys])
 
 # Ensure current dir is in path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
-# Import the new Lightning Module
+# Import the Distance Model
 from train_lightning_distance import GDPDistanceLightningModel
+from toolkit import *
 
-if __name__ == "__main__": 
+def check_list_str(list_in):
+    list_out = []
+    for i in list_in:
+        if isinstance(i, str):
+            list_out.append(i)
+    return list_out
 
-    parser = argparse.ArgumentParser(description='Inference for 3D Model (Slice-by-Slice) - Distance Model')
-    # Default to config_infer.yaml but user can override. 
-    # Note: user might need to point to a config that has the correct checkpoint path.
+class SimpleDataset(Dataset):
+    """
+    Simplified Dataset that loads data WITHOUT resizing the depth dimension.
+    It returns the original 3D volume (C, D, H, W) so we can iterate slice-by-slice.
+    """
+    def __init__(self, cfig, phase='test', dev_split='test'):
+        self.cfig = cfig
+        self.phase = phase
+        
+        # Load CSV
+        if 'csv_root' not in cfig:
+            raise ValueError("cfig['csv_root'] is missing. Please check your config file.")
+            
+        df = pd.read_csv(cfig['csv_root'])
+        
+        # Filtering (match existing logic)
+        if 'phase' in df.columns and 'dev_split' in df.columns:
+             df = df.loc[(df['phase'] == phase) & (df['dev_split'] == dev_split)]
+        
+        if 'npz_path' not in df.columns:
+             raise ValueError("CSV missing 'npz_path' column.")
+             
+        self.data_list = df['npz_path'].tolist()
+        
+        print(f"SimpleDataset Initialized. Found {len(self.data_list)} cases.")
+
+    def __len__(self):
+        return len(self.data_list)
+    
+    def __getitem__(self, index):
+        data_path = self.data_list[index]
+        # Extract ID from filename
+        ID = os.path.basename(data_path).replace('.npz', '')
+        
+        # Load NPZ
+        try:
+            data_npz = np.load(data_path, allow_pickle=True)
+            # data_npz is likely a NpzFile object, need to access the item inside if structured that way
+            # Based on inference_simple.py: In_dict = dict(data_npz)['arr_0'].item()
+            # This suggests the npz was saved with np.savez(..., arr_0=dict) or similar
+            if 'arr_0' in data_npz:
+                In_dict = data_npz['arr_0'].item()
+            else:
+                # Fallback: maybe keys are directly in npz
+                In_dict = {k: data_npz[k] for k in data_npz.files}
+                
+        except Exception as e:
+            print(f"Error loading {data_path}: {e}")
+            # Return dummy
+            return {'data': torch.zeros(6, 10, 256, 256), 'id': ID, 'ori_img_size': torch.tensor([10, 256, 256])}
+
+        
+        # Keys expected: 'mass_density', 'comb_optptv', 'comb_oar_priority', 'beam_plate_norm', 'comb_oar_distance', 'Body'
+        KEYS_TO_LOAD = ['mass_density', 'comb_optptv', 'comb_oar_priority', 'beam_plate_norm', 'comb_oar_distance', 'Body']
+        
+        for key in KEYS_TO_LOAD:
+            if key in In_dict:
+                val = In_dict[key]
+                if isinstance(val, np.ndarray):
+                    # Ensure float type and add channel dim [1, D, H, W]
+                    tensor_val = torch.from_numpy(val.astype('float32')).unsqueeze(0)
+                    # Handle NaNs/Infs
+                    tensor_val[torch.isnan(tensor_val)] = 0
+                    tensor_val[torch.isinf(tensor_val)] = 0
+                    In_dict[key] = tensor_val
+                else:
+                    # Already tensor?
+                    if isinstance(val, torch.Tensor):
+                        if val.dim() == 3: val = val.unsqueeze(0)
+                        In_dict[key] = val
+            else:
+                 # Backup if missing
+                 ref_shape = In_dict['Body'].shape if 'Body' in In_dict else (1, 10, 512, 512)
+                 if len(ref_shape) == 4: ref_shape = ref_shape[1:] # if (1, D, H, W) -> (D, H, W)
+                 In_dict[key] = torch.zeros((1, *ref_shape))
+        
+        # Concatenate Input Data (6 Channels)
+        # Order: MassDensity, PTV, OAR_Priority, Beam, OAR_Dist, Body
+        try:
+            data_tensor = torch.cat((
+                In_dict['mass_density'], 
+                In_dict['comb_optptv'],  
+                In_dict['comb_oar_priority'],  
+                In_dict['beam_plate_norm'],
+                In_dict['comb_oar_distance'], 
+                In_dict['Body']
+            ), dim=0) # [6, D, H, W]
+        except Exception as e:
+             print(f"Error concatenating tensors for {ID}: {e}")
+             # Debug shapes
+             for k in KEYS_TO_LOAD:
+                 print(f"{k}: {In_dict[k].shape}")
+             raise e
+        
+        # Original Image Size (D, H, W)
+        ori_img_size = torch.tensor(data_tensor.shape[1:]) 
+        
+        return {
+            'data': data_tensor,
+            'id': ID,
+            'ori_img_size': ori_img_size
+        }
+
+def inference_distance_simple():
+    parser = argparse.ArgumentParser(description='Simple Slice-by-Slice Inference - Distance Model')
     parser.add_argument('--cfig_path', default='config_files/config_infer.yaml', type=str)
-    parser.add_argument('--visualize', default='on', type=str, choices=['on','off'])
+    parser.add_argument('--phase', default='valid', type=str, help='Phase to filter data (train/valid/test)')
+    parser.add_argument('--dev_split', default='test', type=str, help='Split to filter data (train/valid/test)')
     args = parser.parse_args()
 
+    # 1. Load Config
+    if not os.path.exists(args.cfig_path):
+        print(f"Config file not found: {args.cfig_path}")
+        return
+
+    print(f"Loading config from {args.cfig_path}...")
     cfig = yaml.load(open(args.cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    # ------------ data loader (3D) -----------------#
-    loaders = data_loader_lightning.GetLoader(cfig = cfig['loader_params'])
-    test_loader = loaders.val_dataloader()
-
-    # Determine Model Layout / Strategy
-    # For distance model, we usually use 'default' strategy for inference unless specified otherwise
-    strategy = cfig.get('strategy', 'default')
     
-    # Path to the checkpoint you want to infer on
-    checkpoint_path = cfig['save_model_path']
-    print(f"Loading checkpoint: {checkpoint_path}")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # 2. Load Model
+    checkpoint_path = None
+    if 'save_model_root' in cfig:
+        checkpoint_path = cfig['save_model_root']
+    elif 'save_model_path' in cfig:
+        checkpoint_path = cfig['save_model_path']
+    
+    if not checkpoint_path:
+        print("Error: Config must specify 'save_model_root' or 'save_model_path'.")
+        return
 
-    # Load from compatible checkpoint
-    # We must ensure cfig has 'model_params' populated or passed correctly
+    # If directory, find best ckpt
+    if os.path.isdir(checkpoint_path):
+        potential_ckpts = [f for f in os.listdir(checkpoint_path) if f.endswith('.ckpt')]
+        if not potential_ckpts:
+             print(f"No .ckpt found in directory {checkpoint_path}.")
+             return
+        # Try to pick best by val_loss if possible, else first
+        best_ckpt = next((x for x in potential_ckpts if 'min_val_loss' in x), potential_ckpts[0])
+        checkpoint_path = os.path.join(checkpoint_path, best_ckpt)
+    
+    print(f"Loading model checkpoint from: {checkpoint_path}")
+    
+    # Ensure model params 
     if 'model_params' not in cfig:
-        # Fallback or error? Usually config_infer has limited params.
-        # We might need to inject model params if they are missing, specifically input_channels=6
         cfig['model_params'] = {'input_channels': 6}
 
     try:
+        # Load Distance Model
         pl_module = GDPDistanceLightningModel.load_from_checkpoint(
             checkpoint_path, 
             cfig=cfig, 
-            strategy=strategy,
-            strict=True 
+            strategy=cfig.get('strategy', 'default'),
+            strict=False
         )
     except Exception as e:
-        print(f"Failed to load with strict=True: {e}")
-        print("Retrying with strict=False...")
-        pl_module = GDPDistanceLightningModel.load_from_checkpoint(
-            checkpoint_path, 
-            cfig=cfig, 
-            strategy=strategy,
-            strict=False 
-        )
+        print(f"Error loading model: {e}")
+        return
 
     model = pl_module.model.to(device)
-
-    save_pred_path = cfig.get('save_pred_path', 'results_distance')
-    if not os.path.exists(save_pred_path):
-        os.makedirs(save_pred_path)
+    model.eval()
     
-    # Initialize Global Metrics Log (Overwrite old file)
-    global_metrics_path = Path(save_pred_path) / "global_metrics.txt"
-    with open(global_metrics_path, 'w', encoding='utf-8') as f:
-        f.write(f"Inference Log (Distance Model) - Started at {datetime.now()}\n")
-        f.write("="*80 + "\n")
+    # 3. Prepare Data
+    print(f"Initializing Dataset with phase={args.phase}, dev_split={args.dev_split}")
+    dataset = SimpleDataset(cfig['loader_params'], phase=args.phase, dev_split=args.dev_split)
     
-    print(f"Starting inference on device: {device}")
-
-    # Global metrics accumulators
-    total_l1 = []
-    total_mse = []
-    total_rmse = []
-    total_psnr = []
-
-    with torch.no_grad():
-        model.eval()
-        
-        for batch_idx, batch in enumerate(test_loader):
-            inputs_3d = batch['data']
-            labels_3d = batch['label']
-            body_mask_3d = batch['Body']
-            case_ids = batch['id']
-            
-            for b in range(len(case_ids)):
-                case_id = case_ids[b]
-                
-                # Extract volumes
-                vol_input = inputs_3d[b]      # (C, D, H, W)
-                vol_label = labels_3d[b]      # (C, D, H, W)
-                vol_body = body_mask_3d[b]    # (1, D, H, W)
-
-                # Channels:
-                # [0:MassDensity, 1:PTV, 2:OAR_Priority, 3:Beam, 4:OAR_Dist, 5:Body]
-                vol_ptv_dose = vol_input[1]
-                vol_oar_priority = vol_input[2]
-                vol_beam_plate_norm = vol_input[3]
-                vol_distance = vol_input[4]
-                
-                C, D, H, W = vol_input.shape
-                
-                # Batch Inference Implementation
-                BATCH_SIZE = 16
-                vol_input_permuted = vol_input.permute(1, 0, 2, 3) # (D, C, H, W)
-                pred_slices = []
-                
-                for i in range(0, D, BATCH_SIZE):
-                    batch_input = vol_input_permuted[i:i+BATCH_SIZE].to(device).float()
-                    
-                    # Forward pass
-                    # model(batch) -> output, f6, f12 (we only need output)
-                    output, _, _ = model(batch_input)
-                    
-                    output = output * cfig['scale_out']
-                    pred_slices.append(output.cpu().numpy())
-                
-                preds_np = np.concatenate(pred_slices, axis=0)
-                preds_np = np.transpose(preds_np, (1, 0, 2, 3)) # (C, D, H, W)
-                
-                labels_np = vol_label.numpy()
-                body_np = vol_body.numpy() > 0.5
-
-                if 'dose_div_factor' in cfig['loader_params']:
-                    preds_np = preds_np  * cfig['loader_params']['dose_div_factor']
-                    labels_np = labels_np * cfig['loader_params']['dose_div_factor']
-
-                # Apply Body Mask to Prediction
-                preds_np = preds_np * body_np.astype(preds_np.dtype)
-
-                # --- RESIZE TO ORIGINAL SIZE FOR EVALUATION ---
-                if 'ori_img_size' in batch:
-                    # ori_img_size is (Batch, 3) -> (D, H, W)
-                    # We are inside the loop over case_ids, so we take the b-th element
-                    target_shape = batch['ori_img_size'][b].cpu().numpy().astype(int) # [D, H, W]
-                    
-                    # Current shape: (C, D, H, W)
-                    curr_d, curr_h, curr_w = preds_np.shape[1], preds_np.shape[2], preds_np.shape[3]
-                    
-                    if (curr_h != target_shape[1]) or (curr_w != target_shape[2]) or (curr_d != target_shape[0]):
-                        # print(f"Resizing from {(curr_d, curr_h, curr_w)} to {target_shape}")
-                        
-                        # Convert to Torch for interpolation
-                        # Input to interpolate: (Batch, Channel, D, H, W)
-                        preds_t = torch.from_numpy(preds_np).float().unsqueeze(0)
-                        labels_t = torch.from_numpy(labels_np).float().unsqueeze(0)
-                        body_t = torch.from_numpy(body_np).float().unsqueeze(0)
-
-                        # Resize
-                        # Trilinear for continuous data (pred, label)
-                        preds_t = torch.nn.functional.interpolate(preds_t, size=tuple(target_shape), mode='trilinear', align_corners=False)
-                        labels_t = torch.nn.functional.interpolate(labels_t, size=tuple(target_shape), mode='trilinear', align_corners=False)
-                        # Nearest for masks (body)
-                        body_t = torch.nn.functional.interpolate(body_t, size=tuple(target_shape), mode='nearest')
-                        
-                        # Back to Numpy
-                        preds_np = preds_t.squeeze(0).numpy()
-                        labels_np = labels_t.squeeze(0).numpy()
-                        body_np = body_t.squeeze(0).numpy() > 0.5
-                        
-                        # Re-mask after resize to ensure cleanliness
-                        preds_np = preds_np * body_np.astype(preds_np.dtype)
-                        labels_np = labels_np * body_np.astype(labels_np.dtype)
-
-                # --- Compute Metrics ---
-                if np.any(body_np):
-                    diff = (preds_np - labels_np)[body_np]
-                else:
-                    diff = (preds_np - labels_np).flatten()
-                
-                l1 = float(np.mean(np.abs(diff)))
-                mse = float(np.mean(diff ** 2))
-                rmse = math.sqrt(mse)
-                
-                peak = float(np.max(labels_np)) 
-                if peak <= 0: peak = float(np.max(preds_np))
-                if peak <= 0: peak = 1.0
-                
-                psnr = float('inf') if rmse == 0 else 20.0 * math.log10(peak / (rmse + 1e-12))
-                  
-                print(f"[Case: {case_id}] Depth: {D} -> {preds_np.shape[1]} | MAE: {l1:.6f} | MSE: {mse:.6f} | RMSE: {rmse:.6f} | PSNR: {psnr:.3f} dB")
-                
-                # Save visualization if enabled
-                if args.visualize == 'on':
-                    # Define and create visualization directory
-                    vis_dir = Path(save_pred_path) / 'visualization' / str(case_id)
-                    vis_dir.mkdir(parents=True, exist_ok=True)
-                    
-                    # Update global metrics file
-                    with open(global_metrics_path, 'a', encoding='utf-8') as f:
-                        f.write(f"[Case: {case_id}] Depth: {D} | MAE: {l1:.6f} | MSE: {mse:.6f} | RMSE: {rmse:.6f} | PSNR: {psnr:.3f} dB\n")
-
-                    total_l1.append(l1)
-                    total_mse.append(mse)
-                    total_rmse.append(rmse)
-                    if np.isfinite(psnr):
-                        total_psnr.append(psnr)
-                
-                    # Visualize slices
-                    for d in range(D):
-                        s_pred = preds_np[0, d, :, :]
-                        s_true = labels_np[0, d, :, :]
-
-                        slice_ptv = vol_ptv_dose[d, :, :].cpu().numpy()
-                        slice_oar = vol_oar_priority[d, :, :].cpu().numpy()
-                        slice_beam = vol_beam_plate_norm[d, :, :].cpu().numpy()
-                        slice_dist = vol_distance[d, :, :].cpu().numpy()
-
-                        mask_ptv = (slice_ptv > 0).astype(float) 
-                        mask_oar = (slice_oar > 0).astype(float)
-                        
-                        # Layout: 2 rows, 3 columns
-                        # Row 1: GT Dose | Pred Dose | Difference
-                        # Row 2: Distance Map | OAR | PTV (or Beam)
-                        fig, axes = plt.subplots(2, 3, figsize=(18, 10), dpi=100)
-                        axes = axes.flatten()
-                        
-                        vmax = max(np.max(s_true), np.max(s_pred))
-                        if vmax <= 0: vmax = 1.0
-                        
-                        # --- 1. GT Dose ---
-                        ax = axes[0]
-                        ax.set_title(f"GT Dose (Max: {np.max(s_true):.2f})", fontsize=10)
-                        im = ax.imshow(s_true, cmap='jet', vmin=0, vmax=vmax, origin='lower')
-                        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.axis('off')
-
-                        # --- 2. Pred Dose ---
-                        ax = axes[1]
-                        ax.set_title(f"Pred Dose (Max: {np.max(s_pred):.2f})", fontsize=10)
-                        im = ax.imshow(s_pred, cmap='jet', vmin=0, vmax=vmax, origin='lower')
-                        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.axis('off')
-
-                        # --- 3. Difference ---
-                        ax = axes[2]
-                        diff_slice = s_pred - s_true
-                        dmax = max(abs(diff_slice.min()), abs(diff_slice.max()))
-                        if dmax == 0: dmax = 1e-6
-                        ax.set_title(f"Diff [{diff_slice.min():.2f}, {diff_slice.max():.2f}]", fontsize=10)
-                        im = ax.imshow(diff_slice, cmap='RdBu_r', vmin=-dmax, vmax=dmax, origin='lower')
-                        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.axis('off')
-
-                        # --- 4. Distance Map (New!) ---
-                        ax = axes[3]
-                        ax.set_title("Distance Map Input", fontsize=10)
-                        # Distance map usually has value -1 to 1 or 0 to 1 depending on norm
-                        im = ax.imshow(slice_dist, cmap='viridis', origin='lower')
-                        fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.axis('off')
-
-                        # --- 5. OAR ---
-                        ax = axes[4]
-                        ax.set_title("OAR", fontsize=10)
-                        ax.imshow(mask_oar, cmap='gray', origin='lower')
-                        ax.axis('off')
-
-                        # --- 6. PTV ---
-                        ax = axes[5]
-                        ax.set_title("PTV", fontsize=10)
-                        ax.imshow(mask_ptv, cmap='gray', origin='lower')
-                        ax.axis('off')
-
-                        fig.suptitle(f"Patient: {case_id} - Slice {d:03d}", fontsize=14)
-                        plt.savefig(vis_dir / f"{case_id}_slice_{d:03d}.png", bbox_inches='tight')
-                        plt.close(fig)
-
-    # Final Summary
-    if len(total_l1) > 0:
-        mean_l1 = np.mean(total_l1)
-        mean_mse = np.mean(total_mse)
-        mean_rmse = np.mean(total_rmse)
-        mean_psnr = np.mean(total_psnr)
-        
-        print("\n" + "="*50)
-        print(f"[Final Summary] Total Cases: {len(total_l1)}")
-        print(f"Mean MAE:  {mean_l1:.6f}")
-        print(f"Mean MSE:  {mean_mse:.6f}")
-        print(f"Mean RMSE: {mean_rmse:.6f}")
-        print(f"Mean PSNR: {mean_psnr:.3f} dB")
-        print("="*50)
-        
-        with open(global_metrics_path, 'a', encoding='utf-8') as f:
-            f.write(f"\nFinal Summary:\nMean MAE: {mean_l1:.6f}\nMean RMSE: {mean_rmse:.6f}\nMean PSNR: {mean_psnr:.3f}\n")
+    # Batch size 1 because we process full volumes
+    loader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=0) 
+    
+    # 4. Inference
+    save_root = cfig.get('save_pred_path', 'results_distance_simple')
+    os.makedirs(save_root, exist_ok=True)
+    
+    print(f"Starting inference... Saving to {save_root}")
+    
+    # Target slice size
+    if 'in_size' not in cfig['loader_params']:
+         print("Warning: 'in_size' not in loader_params, defaulting to [96, 256, 256]")
+         target_h, target_w = 256, 256
     else:
-        print("No cases processed.")
+         target_h, target_w = cfig['loader_params']['in_size'][1], cfig['loader_params']['in_size'][2]
+    
+    with torch.no_grad():
+        for batch in tqdm(loader):
+            # Unpack
+            vol_data = batch['data'][0] # [6, D, H, W]
+            case_id = batch['id'][0]
+            ori_size = batch['ori_img_size'][0] # [D, H, W]
+            
+            orig_d, orig_h, orig_w = ori_size[0].item(), ori_size[1].item(), ori_size[2].item()
+            
+            # Slice-by-Slice Processing
+            pred_slices = []
+            
+            for d in range(orig_d):
+                # 1. Extract Slice: [6, H_orig, W_orig]
+                slice_input = vol_data[:, d, :, :]
+                
+                # 2. Resize to Model Input: [1, 6, 256, 256]
+                batch_slice = slice_input.unsqueeze(0).to(device)
+                
+                batch_slice_resized = F.interpolate(
+                    batch_slice, 
+                    size=(target_h, target_w), 
+                    mode='bilinear', 
+                    align_corners=False, 
+                    antialias=True
+                )
+                
+                # 3. Inference
+                output, _, _ = model(batch_slice_resized)
+                
+                # Scale output
+                output = output * cfig['scale_out']
+                if 'dose_div_factor' in cfig['loader_params']:
+                    output = output * cfig['loader_params']['dose_div_factor']
+                
+                # 4. Resize back to Original: [1, 1, H_orig, W_orig]
+                output_orig = F.interpolate(
+                    output,
+                    size=(orig_h, orig_w),
+                    mode='bilinear',
+                    align_corners=False,
+                    antialias=True
+                )
+                
+                # Append [H, W]
+                pred_slices.append(output_orig.cpu().numpy()[0, 0])
+            
+            # Stack slices: [D, H, W]
+            pred_volume = np.stack(pred_slices, axis=0) 
+            
+            # 5. Save
+            save_name = f"{case_id}_pred.npy"
+            save_path = os.path.join(save_root, save_name)
+            np.save(save_path, pred_volume)
+
+    print("Inference finished.")
+
+if __name__ == "__main__":
+    inference_distance_simple()

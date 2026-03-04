@@ -2,7 +2,7 @@ import os
 import sys
 import torch
 import torch.nn as nn
-from torchdiffeq import odeint
+
 # Ensure we can import from the local dinov3 package
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
@@ -10,9 +10,9 @@ if current_dir not in sys.path:
 
 from dinov3.models.vision_transformer import vit_base
 
-# --- Backbone Adapter ---
+# --- Backbone Adapter (Reused/Modified) ---
 class MedDINOv3Backbone(nn.Module):
-    def __init__(self, checkpoint_path, input_dim=6):
+    def __init__(self, checkpoint_path, input_dim=3):
         super().__init__()
         # 1. Initialize model with MedDINOv3 specific parameters
         self.model = vit_base(
@@ -56,15 +56,12 @@ class MedDINOv3Backbone(nn.Module):
                 # Load weights (strict=False to allow for some mismatch, e.g. pos_embed resizing if needed)
                 missing, unexpected = self.model.load_state_dict(new_state_dict, strict=False)
                 print(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
-                if len(missing) > 0:
-                    print(f"First few missing: {missing[:5]}")
             except Exception as e:
                 print(f"Error loading weights: {e}")
         else:
             print(f"Warning: Checkpoint {checkpoint_path} not found. Using random initialization.")
 
     def adapt_channels(self, input_dim):
-        # print(f"Adapting first layer from 3 to {input_dim} channels...")
         patch_embed_layer = self.model.patch_embed.proj
         
         original_weights = patch_embed_layer.weight.data
@@ -102,37 +99,122 @@ class MedDINOv3Backbone(nn.Module):
         )
         return features
 
-# --- Decoder Blocks ---
+# --- Geometry Encoder ---
+class GeometryEncoder(nn.Module):
+    """
+    A lightweight CNN encoder for distance/geometric maps.
+    Downsamples from (B, 1, H, W) to (B, embed_dim, H/16, W/16).
+    """
+    def __init__(self, input_dim=1, embed_dim=768):
+        super().__init__()
+        
+        self.stem = nn.Sequential(
+            nn.Conv2d(input_dim, 64, kernel_size=7, stride=2, padding=3, bias=False),  # H/2
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            # nn.MaxPool2d(kernel_size=3, stride=2, padding=1) # H/4 - Skip maxpool to keep more info early on? Or stick to standard
+        )
+        # Assuming H/2 after stem. We need to reach H/16. So 3 more downsamples.
+        
+        # Layer 1: H/2 -> H/4
+        self.layer1 = nn.Sequential(
+            nn.Conv2d(64, 128, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(128),
+            nn.ReLU(inplace=True)
+        )
+        
+        # Layer 2: H/4 -> H/8
+        self.layer2 = nn.Sequential(
+            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, 256, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True)
+        )
+
+        # Layer 3: H/8 -> H/16
+        self.layer3 = nn.Sequential(
+            nn.Conv2d(256, embed_dim, kernel_size=3, stride=2, padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(embed_dim, embed_dim, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.ReLU(inplace=True)
+        )
+        
+    def forward(self, x):
+        x = self.stem(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        return x
+
+# --- Cross Attention Fusion Block ---
+class CrossAttentionFusion(nn.Module):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim // num_heads
+        self.scale = head_dim ** -0.5
+
+        self.norm1 = nn.LayerNorm(dim)
+        self.norm2 = nn.LayerNorm(dim)
+        
+        self.to_q = nn.Linear(dim, dim, bias=qkv_bias)
+        self.to_k = nn.Linear(dim, dim, bias=qkv_bias)
+        self.to_v = nn.Linear(dim, dim, bias=qkv_bias)
+
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+    def forward(self, x_main, x_geo):
+        """
+        x_main: DINO features (B, C, H, W)
+        x_geo: Geometry features (B, C, H, W)
+        """
+        B, C, H, W = x_main.shape
+        # Flatten spatial dimensions for attention
+        # (B, H*W, C)
+        q = self.norm1(x_main.flatten(2).transpose(1, 2))
+        k = self.norm2(x_geo.flatten(2).transpose(1, 2))
+        v = self.norm2(x_geo.flatten(2).transpose(1, 2))
+        
+        q = self.to_q(q).reshape(B, H*W, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        k = self.to_k(k).reshape(B, H*W, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+        v = self.to_v(v).reshape(B, H*W, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
+
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        x = (attn @ v).transpose(1, 2).reshape(B, H*W, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        
+        # Residual connection + Reshape back to CHW
+        out = x.transpose(1, 2).reshape(B, C, H, W)
+        self.gamma = nn.Parameter(torch.zeros(1))
+        return x_main + self.gamma * out
+
+# --- Decoder Blocks (Same as original) ---
 class SingleDeconv2DBlock(nn.Module):
     def __init__(self, in_planes, out_planes):
         super().__init__()
-        self.block = nn.ConvTranspose2d(
-            in_planes, 
-            out_planes, 
-            kernel_size=2, 
-            stride=2, 
-            padding=0, 
-            output_padding=0
-        )
-
+        self.block = nn.ConvTranspose2d(in_planes, out_planes, 2, 2, 0, output_padding=0)
     def forward(self, x):
         return self.block(x)
-
 
 class SingleConv2DBlock(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size):
         super().__init__()
-        self.block = nn.Conv2d(
-            in_planes,
-            out_planes,
-            kernel_size=kernel_size,
-            stride=1,
-            padding=((kernel_size - 1) // 2),
-        )
-
+        self.block = nn.Conv2d(in_planes, out_planes, kernel_size, 1, (kernel_size - 1) // 2)
     def forward(self, x):
         return self.block(x)
-
 
 class Conv2DBlock(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size=3):
@@ -142,10 +224,8 @@ class Conv2DBlock(nn.Module):
             nn.BatchNorm2d(out_planes),
             nn.ReLU(True),
         )
-
     def forward(self, x):
         return self.block(x)
-
 
 class Deconv2DBlock(nn.Module):
     def __init__(self, in_planes, out_planes, kernel_size=3):
@@ -156,10 +236,8 @@ class Deconv2DBlock(nn.Module):
             nn.BatchNorm2d(out_planes),
             nn.ReLU(True),
         )
-
     def forward(self, x):
         return self.block(x)
-
 class nmODEFunc(nn.Module):
     def __init__(self):
         super(nmODEFunc, self).__init__()
@@ -195,27 +273,40 @@ class nmODEBlock(nn.Module):
         self.odefunc.fresh(drive)
         
         # 3. 定义初始状态 y(0)
-        # 优化: 初始状态 y0 = x (从特征本身开始演化)
-        y0 = x
+        y0 = torch.zeros_like(x)
         
         # 4. 求解 ODE (积分时间 0 -> 1)
         times = torch.tensor([0, 1.0]).type_as(x)
         out = odeint(self.odefunc, y0, times, method='rk4')[1]
         
-        # 5. 输出变换 + 残差连接 
-        # Output = Conv(ODE(x)) + x
-        return self.out_conv(out) + x
+        # 5. 输出变换
+        return self.out_conv(out)
 
 # --- Main Model ---
-class MED_DINO_UNETR(nn.Module):
+class MED_DINO_UNETR_Distance_nmODE(nn.Module):
     def __init__(self, checkpoint_path, embed_dim=768, input_dim=6, output_dim=1):
         super().__init__()
-        # 1. Use the new MedDINOv3 Backbone
-        self.backbone = MedDINOv3Backbone(checkpoint_path, input_dim)
+        
+        print(f"Initializing MED_DINO_UNETR_Distance_nmODE...")
+        # 1. Main Backbone (DINOv3) - takes 5 channels
+        # (Mass Density, PTV, OAR Priority, Beam Plate, Body)
+        # Excluding Distance (index 4)
+        self.backbone = MedDINOv3Backbone(checkpoint_path, input_dim=5)
+        
+        # 2. Geometry Encoder - takes 1 channel (Distance only)
+        # Using a simple CNN that outputs same dim as DINO
+        self.geo_encoder = GeometryEncoder(input_dim=1, embed_dim=embed_dim)
+        
+        # 3. Fusion Layer (Cross Attention)
+        self.fusion_layer = CrossAttentionFusion(dim=embed_dim)
 
-        # 2. U-Net Decoder (Same as before)
+        # 4. U-Net Decoder
+        # Initial convolution for the raw input skip connection. 
+        # Using the full 6-channel input here for low-level details.
+        # We enforce 6 channels here because the forward pass sends 'x' (6 channels) to decoder0.
+        decoder_in_channels = 6
         self.decoder0 = nn.Sequential(
-            Conv2DBlock(input_dim, 32, 3), 
+            Conv2DBlock(decoder_in_channels, 32, 3), 
             Conv2DBlock(32, 64, 3)
         )
 
@@ -253,45 +344,79 @@ class MED_DINO_UNETR(nn.Module):
             nn.Conv2d(128, 32, kernel_size=3, padding=1), 
             nn.GroupNorm(8, 32),
             nn.LeakyReLU(0.1, inplace=False),
-            # 优化: 在 32 通道上进行非线性动力学修正 (特征维度更高)
-            nmODEBlock(channels=32),
-            
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.1, inplace=False),
+            # 在 16 通道上进行非线性动力学修正
+            nmODEBlock(channels=16), 
             # 最终输出层 (16 -> output_dim)
             nn.Conv2d(16, output_dim, kernel_size=1),
             nn.Softplus() # 保持 Softplus 因为剂量必须 > 0
         )
     
     def forward(self, x):
-        features = self.backbone(x)
-        f0, f3, f6, f9, f12 = x, features[0], features[1], features[2], features[3] # 1,768,16,16
+        # x: (B, 6, H, W)
+        # Channels:
+        # 0: mass_density
+        # 1: comb_optptv
+        # 2: comb_oar_priority
+        # 3: beam_plate_norm
+        # 4: comb_oar_distance
+        # 5: Body
         
-        # print(f0.shape, f3.shape, f6.shape, f9.shape, f12.shape)
+        # Split input
+        # Path 1: DINO Encoder (5 channels) -> Indices 0, 1, 2, 3, 5
+        # We concatenate non-distance channels
+        x_img = torch.cat([x[:, :4, :, :], x[:, 5:, :, :]], dim=1)
         
-        f12 = self.decoder12_upsampler(f12)
+        # Path 2: Geometry Encoder (1 channel) -> Index 4 (Distance)
+        x_geo = x[:, 4:5, :, :]
+
+        # 1. Forward Pass DINO
+        features = self.backbone(x_img)
+        # features[0]: layer 3, [1]: layer 6, [2]: layer 9, [3]: layer 12
+        f3, f6, f9, f12 = features[0], features[1], features[2], features[3]
+
+        # 2. Forward Pass Geometry Encoder
+        geo_feat = self.geo_encoder(x_geo) # Should be same shape as f12: (B, 768, H/16, W/16)
+
+        # 3. Fusion at Layer 12
+        # Enhance DINO features with Geometry features
+        f12_fused = self.fusion_layer(f12, geo_feat)
+
+        # 4. Decoder
+        # Use fused features for f12
+        
+        # f0: Skip connection from raw input. Using the full 6-channel input here for low-level details
+        f0 = self.decoder0(x) 
+        
+        f12_up = self.decoder12_upsampler(f12_fused)
+        
         f9 = self.decoder9(f9)
-        f9 = self.decoder9_upsampler(torch.cat([f9, f12], dim=1))
+        f9 = self.decoder9_upsampler(torch.cat([f9, f12_up], dim=1))
+        
         f6 = self.decoder6(f6)
         f6 = self.decoder6_upsampler(torch.cat([f6, f9], dim=1))
+        
         f3 = self.decoder3(f3)
         f3 = self.decoder3_upsampler(torch.cat([f3, f6], dim=1))
-        f0 = self.decoder0(f0)
+        
         output = self.head(torch.cat([f0, f3], dim=1))
-        return output, features[1], features[3]
+        
+        return output, f6, f12_fused
 
 if __name__ == '__main__':
     # Define checkpoint path
+    # Using a dummy path or local path if available
     ckpt_path = r"c:\Users\960\Desktop\DinoUNETR\dino_unetr\model.pth"
     
-    print(f"Initializing MED_DINO_UNETR with checkpoint: {ckpt_path}")
-    model = MED_DINO_UNETR(checkpoint_path=ckpt_path)
-    # print(model)
+    print(f"Initializing MED_DINO_UNETR_Distance...")
+    model = MED_DINO_UNETR_Distance(checkpoint_path=ckpt_path)
     
     # Test Forward Pass
     print("\nTesting forward pass...")
-    input_tensor = torch.randn(1, 6, 256, 256)
+    # B, C, H, W
+    input_tensor = torch.randn(1, 6, 256, 256) 
     try:
         output_tensor,_,_ = model(input_tensor)
         print(f"Input shape: {input_tensor.shape}")
@@ -299,3 +424,5 @@ if __name__ == '__main__':
         print("Test passed!")
     except Exception as e:
         print(f"Test failed: {e}")
+        import traceback
+        traceback.print_exc()
