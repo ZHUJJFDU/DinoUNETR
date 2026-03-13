@@ -9,15 +9,12 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from data_loader_lightning import MyDataset
 from toolkit import tt_augmentation
 
-# --- 全局变量设置 ---
+# Global state for threaded workers
 GLOBAL_DATASET = None
 SAVE_ROOT = None
 
 class ProcessDataset(MyDataset):
-    """
-    继承 MyDataset，但在 __getitem__ 中强制保持原始 Z 轴深度。
-    仅 Resize X 和 Y 到 config 指定的大小 (例如 256x256)。
-    """
+    """Keep original depth while resizing only in-plane dimensions."""
     def __getitem__(self, index):
         data_path = self.data_list[index]
         ID = self.data_list[index].split('/')[-1].replace('.npz', '')
@@ -30,9 +27,6 @@ class ProcessDataset(MyDataset):
         angle_list = In_dict['angle_list']
         ori_img_size = In_dict['Body'].shape # (D, H, W)
 
-        # 1. 动态确定目标尺寸
-        # target_z = 原始深度
-        # target_h, target_w = yaml配置的 out_size (例如 256, 256)
         target_z = ori_img_size[0]
         target_h = self.cfig['out_size'][1]
         target_w = self.cfig['out_size'][2]
@@ -46,11 +40,8 @@ class ProcessDataset(MyDataset):
             else:
                 KEYS.remove(key)
 
-        # 2. 强制使用 tt_augmentation (测试时增强，即Resize) 
-        # 并且传入我们动态计算的 target_size
         self.aug = tt_augmentation(KEYS, self.cfig['in_size'], target_size, isocenter)
 
-        # 应用数据增强 (Resize)
         In_dict = self.aug(In_dict)
         for k in list(In_dict.keys()):
             v = In_dict[k]
@@ -63,27 +54,21 @@ class ProcessDataset(MyDataset):
 
         if 'label' in In_dict.keys():
             data_dict['label'] = In_dict['label']
-            # ref_dose = In_dict['label'] * 1
-            # data_dict['ref_5Gy_mask'] = (ref_dose > 5) & (In_dict['Body'] > 0)
 
         In_dict['Body'] = (In_dict['Body'] > 0.5).type(torch.FloatTensor)
         if 'PTV_expanded' in In_dict:
             In_dict['PTV_expanded'] = (In_dict['PTV_expanded'] > 0.5).type(torch.FloatTensor)
 
-        # 拼接 Data (6通道)
-        # 注意：这里需要确保 In_dict 里包含所有需要的键，如果用了 SimpleDataset 逻辑可能会少键
-        # 但我们继承自 MyDataset，假设原始数据是完整的
+        # Concatenate data channels (distance excluded)
         try:
              data_dict['data'] = torch.cat((
                 In_dict['mass_density'], 
                 In_dict['comb_optptv'],  
                 In_dict['comb_oar_priority'],  
                 In_dict['beam_plate_norm'],
-                # In_dict['comb_oar_distance'], # REMOVED for 5-input experiment
                 In_dict['Body']
             ), axis=0)
         except KeyError as e:
-            # Fallback if specific keys missing (should ensure reliability)
             print(f"Warning: Missing key {e} for {ID}")
             raise e
 
@@ -103,9 +88,7 @@ class ProcessDataset(MyDataset):
         return data_dict
 
 def process_one_case(index):
-    """
-    单个线程执行的函数
-    """
+    """Process a single case into per-slice NPZ files."""
     try:
         data_dict = GLOBAL_DATASET[index]
         case_id = data_dict['id']
@@ -114,7 +97,6 @@ def process_one_case(index):
         label_3d = data_dict.get('label', None)
         body_3d = data_dict['Body']
         
-        # 可选 Keys
         ptv_3d = data_dict.get('PTV', None)
         oar_serial_3d = data_dict.get('oar_serial', None)
         oar_parallel_3d = data_dict.get('oar_parallel', None)
@@ -165,7 +147,6 @@ def main():
     print("Loading configuration...")
     cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
 
-    # 任务列表
     tasks = [
         ('Dataset_128160_layout_changechannel_nah&lung/Train', 'train', 'train'),
         ('Dataset_128160_layout_changechannel_nah&lung/Valid', 'train', 'valid'),
@@ -179,7 +160,6 @@ def main():
         os.makedirs(SAVE_ROOT, exist_ok=True)
         
         print(f"Initializing ProcessDataset (Dynamic Z, Fixed XY) for phase='{phase}'...")
-        # 使用自定义的 ProcessDataset
         GLOBAL_DATASET = ProcessDataset(cfig['loader_params'], phase=phase, dev_split=dev_split)
         
         total_cases = len(GLOBAL_DATASET)

@@ -22,8 +22,8 @@ loader_params:
     'dose_div_factor': 10 
     
 strategy: 'default' # Options: lora, llrd, frozen, adapter, default
-layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
 use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
+use_plus: True # True for MED_DINO_UNETR_plus, False for MED_DINO_UNETR
 
 model_params:
     input_channels: 6
@@ -37,5 +37,5 @@ scale_out: 7.5
 
 
 model_from_lightning: True
-save_model_path: trained_models\trained_model_default_256_meddino_distance_nah&lung\dinounetr-best-val-epoch=146-val_loss=0.1808.ckpt
+save_model_path: trained_models\trained_model_default_256_meddino_distance_nah&lung\dinounetr-best-val-epoch=160-val_loss=0.1808.ckpt
 save_pred_path: results\result_default_256_meddino_distance_nah&lung

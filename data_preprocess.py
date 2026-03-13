@@ -24,100 +24,44 @@ Lung_OAR_DICT = {Lung_OAR_LIST[i]: (i+10) for i in range(len(Lung_OAR_LIST))}
 class CreateDataset():
     
     def __init__(self, cfig, phase):
-        '''
-        phase: train, validation, or testing 
-        
-        cfig: the configuration dictionary
-        
-            train_bs: training batch size
-            val_bs: validation batch size
-            num_workers: the number of workers when call the DataLoader of PyTorch
-            
-            csv_root: the meta data file, include patient id, plan id, the .npz data path and some conditions of the plan. 
-            scale_dose_dict: path of a dictionary. The dictionary includes the prescribed doses of the PTVs. 
-            pat_obj_dict: path of a dictionary. The dictionary includes the ROIs (PTVs and OARs) names used in optimization. 
-            
-            down_HU: bottom clip of the CT HU value. 
-            up_HU: upper clip of the CT HU value. 
-            denom_norm_HU: the denominator when normalizing the CT. 
-            
-            in_size & out_size: the size parameters used in data transformation. 
-
-            norm_oar: True or False. Normalize the OAR channel or not. 
-            CatStructures: True or False. Concat the PTVs and OARs in multiple channels, or merge them in one channel, respectively. 
-
-            dose_div_factor: the value used to normalize dose. 
-            
-        '''
+        """Initialize dataset creation for a given split."""
         
         self.cfig = cfig
         df = pd.read_csv(cfig['csv_root'])
         df = df.loc[df['phase'] == phase]
 
         self.phase = phase
-        # Panda Series转化为Python List
         self.data_list = df['npz_path'].tolist()
         self.site_list = df['site'].tolist()
         self.cohort_list = df['cohort'].tolist()
 
-        # 读取每一例的高低剂量区的索引 和 勾画名称索引
         self.scale_dose_Dict = json.load(open(cfig['scale_dose_dict'], 'r'))
         self.pat_obj_dict = json.load(open(cfig['pat_obj_dict'], 'r'))
-        # 读取HaN OAR优先级表 和 isDmax标志
         df_han_oar = pd.read_csv(cfig['csv_HaN_OAR_priority_root'])
         self.HaN_OAR_name = df_han_oar['OAR_Name'].tolist()
         self.HaN_OAR_priority = df_han_oar['Priority'].tolist()
-        # 构建HaN OAR优先级的关联字典
         self.HaN_OAR_PRIORITY_DICT = dict(zip(self.HaN_OAR_name, self.HaN_OAR_priority))
         self.HaN_isDmax = df_han_oar['isDmax'].tolist()
-        # 构建HaN OAR isDmax的关联字典
         self.HaN_isDmax_DICT = dict(zip(self.HaN_OAR_name, self.HaN_isDmax))
 
-        # 读取Lung OAR优先级表 和 isDmax标志
         df_lung_oar = pd.read_csv(cfig['csv_LUNG_OAR_priority_root'])
         self.Lung_OAR_name = df_lung_oar['OAR_Name'].tolist()
         self.Lung_OAR_priority = df_lung_oar['Priority'].tolist()
-        # 构建Lung OAR优先级的关联字典
         self.Lung_OAR_PRIORITY_DICT = dict(zip(self.Lung_OAR_name, self.Lung_OAR_priority))
         self.Lung_isDmax = df_lung_oar['isDmax'].tolist()
-        # 构建Lung OAR isDmax的关联字典
         self.Lung_isDmax_DICT = dict(zip(self.Lung_OAR_name, self.Lung_isDmax))
 
     
     def create_dataset(self):
-        # ensure a log folder exists
         log_dir = os.path.join(os.path.dirname(self.cfig.get('dataset_save_root', '.')), 'logs')
         os.makedirs(log_dir, exist_ok=True)
         bad_log_path = os.path.join(log_dir, 'bad_npz.txt')
-        # ensure dataset root exists
         os.makedirs(self.cfig['dataset_save_root'], exist_ok=True)
 
         lock = threading.Lock()
 
         def _process_one(index: int):
-            """
-            In_dict:
-                'spacing' 物理间距 (z,y,x)
-                'angle_list' 射野角度列表 List
-                'ed' HU转化电子密度矩阵 (z,y,x)
-                'md' HU转化材料密度矩阵 (z,y,x)
-                'img' 经HU值归一化后的CT图像 (z,y,x)
-                'dose' 使用D97进行归一化后的Dose图像 (z,y,x)
-                'dose_div_factor' 归一化因子
-                'OAR' OAR图像 (z,y,x)
-                'PTV' PTV图像 (z,y,x)
-            save_data_dict:
-                'comb_optptv' 合并的PTV处方剂量掩膜 (z,y,x)
-                'comb_oar_priority' 合并的OAR优先级图 (z,y,x)
-                'comb_oar_distance' 合并的OAR距离图 (z,y,x)
-                'mass_density' 材料密度图 (z,y,x)
-                'electron_density' 电子密度图 (z,y,x)
-                'beam_plate_norm' 束板归一化模板 (z,y,x)
-                'oar_serial' 串行OAR掩膜 (z,y,x)
-                'oar_parallel' 并行OAR掩膜 (z,y,x)
-                'label' 标签图 (z,y,x)
-                'prompt' 病例条件提示向量 (1,12)
-            """
+            """Process one NPZ into the normalized training dictionary."""
             data_path = self.data_list[index]
             ID = self.data_list[index].split('/')[-1].replace('.npz', '')
             PatientID = ID.split('+')[0]
@@ -125,7 +69,6 @@ class CreateDataset():
             if len(str(PatientID)) < 3:
                 PatientID = f"{PatientID:0>3}"
 
-            # robust npz load with diagnostics
             try:
                 data_npz = np.load(data_path, allow_pickle=True)
             except Exception as e:
@@ -144,7 +87,6 @@ class CreateDataset():
                     pass
                 return False
 
-            # extract dict from npz (expect arr_0 to hold the dict)
             try:
                 arr0 = dict(data_npz).get('arr_0', None)
                 if arr0 is None:
@@ -164,19 +106,19 @@ class CreateDataset():
                 return False
 
             spacing = [2.0,2.5,2.5]
-            In_dict['spacing'] = spacing # To be validated
+            In_dict['spacing'] = spacing
             angle_list = In_dict['angle_list']
             In_dict['ed'] = HU2electron_density(In_dict['img']) * In_dict['Body'] 
             In_dict['md'] = HU2mass_density(In_dict['img']) * In_dict['Body'] 
             In_dict['img'] = np.clip(In_dict['img'], self.cfig['down_HU'], self.cfig['up_HU']) / self.cfig['denom_norm_HU'] * In_dict['Body'] 
 
             if 'dose' in In_dict.keys():
-                ptv_highdose =  self.scale_dose_Dict[PatientID]['PTV_High']['PDose'] # 高剂量PTV的值
-                In_dict['dose'] = In_dict['dose'] * In_dict['dose_scale'] # 缩放因子后的Dose图像
-                PTVHighOPT = self.scale_dose_Dict[PatientID]['PTV_High']['OPTName'] # 高剂量PTV的名称
-                norm_scale = ptv_highdose / (np.percentile(In_dict['dose'][In_dict[PTVHighOPT].astype('bool')], 3) + 1e-5) # D97 归一化因子
-                In_dict['dose'] = In_dict['dose'] * norm_scale / self.cfig['dose_div_factor'] # 归一化后的Dose图像
-                In_dict['dose'] = np.clip(In_dict['dose'], 0, ptv_highdose * 1.2) # 截断到0-ptv_highdose*1.2之间
+                ptv_highdose =  self.scale_dose_Dict[PatientID]['PTV_High']['PDose']
+                In_dict['dose'] = In_dict['dose'] * In_dict['dose_scale']
+                PTVHighOPT = self.scale_dose_Dict[PatientID]['PTV_High']['OPTName']
+                norm_scale = ptv_highdose / (np.percentile(In_dict['dose'][In_dict[PTVHighOPT].astype('bool')], 3) + 1e-5)
+                In_dict['dose'] = In_dict['dose'] * norm_scale / self.cfig['dose_div_factor']
+                In_dict['dose'] = np.clip(In_dict['dose'], 0, ptv_highdose * 1.2)
 
             isocenter = In_dict['isocenter']
 
@@ -188,7 +130,7 @@ class CreateDataset():
                     if key in KEYS:
                         KEYS.remove(key)
 
-            if self.site_list[index] < 1.5: # 判断ct区域
+            if self.site_list[index] < 1.5:
                 OAR_LIST = self.HaN_OAR_name
                 OAR_PRIORITY = self.HaN_OAR_PRIORITY_DICT
                 OAR_isDmax = self.HaN_isDmax_DICT

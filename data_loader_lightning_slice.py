@@ -23,9 +23,7 @@ from monai.transforms import (
 )
 
 class ProcessedSliceDataset(Dataset):
-    """
-    专门用于读取预处理后的 2D 切片数据 (.npz)
-    """
+    """Load preprocessed 2D slice NPZ files."""
     def __init__(self, data_root, cfig, phase='train'):
         self.data_root = data_root
         self.phase = phase
@@ -39,18 +37,41 @@ class ProcessedSliceDataset(Dataset):
             
         print(f"[{phase}] Initialized dataset from {data_root}. Total slices: {len(self.file_list)}")
 
-        # --- Transforms Setup ---
-        self.out_size = cfig.get('out_size', [96, 256, 256]) # [D, H, W] but dataset is [H, W] usually
+        self.out_size = cfig.get('out_size', [96, 256, 256])
         self.target_h = self.out_size[1]
         self.target_w = self.out_size[2]
         
         self.train_transforms = Compose([
-            # 1. 先 Resize 到一个略大的尺寸，或者直接 Resize 到 target
-            # 既然要做 Global，先统一尺寸，方便后续处理
+            # 1. Random Spatial Crop (Directly from source or with minimal scaling)
+            RandSpatialCropd(
+                keys=self.keys, 
+                roi_size=[int(self.target_h * 0.9), int(self.target_w * 0.9)], 
+                max_roi_size=[int(self.target_h * 1.1), int(self.target_w * 1.1)], 
+                random_center=True, 
+                random_size=True, 
+                allow_missing_keys=True
+            ),
+            
+            # 2. Random Rotate (Reduced prob to 0.5 for better stability)
+            RandRotated(
+                keys=self.keys, 
+                prob=0.5, 
+                range_x=0.2, 
+                mode=modes, 
+                padding_mode='zeros', 
+                allow_missing_keys=True
+            ),
+            
+            # 3. Random Flip (Reduced prob)
+            RandFlipd(keys=self.keys, prob=0.3, spatial_axis=0, allow_missing_keys=True),
+            RandFlipd(keys=self.keys, prob=0.3, spatial_axis=1, allow_missing_keys=True),
+            
+            # 4. Final Resize to target size (The ONLY scaling step that determines fixed size)
             Resized(
                 keys=self.keys, 
-                spatial_size=target_size, # (256, 256)
-                mode=modes
+                spatial_size=target_size, 
+                mode=modes, 
+                allow_missing_keys=True
             )
         ])
         
@@ -66,14 +87,12 @@ class ProcessedSliceDataset(Dataset):
         file_path = self.file_list[idx]
         
         try:
-            # np.load 读取，显式开启 allow_pickle 以支持 object arrays (如 angle_list)
             npz = np.load(file_path, allow_pickle=True)
             
-            data = npz['data'] # (C, H, W)
-            label = npz['label'] # (1, H, W) usually
+            data = npz['data']
+            label = npz['label']
             body = npz['body']            
             
-            # 尝试读取 DVH Loss 所需的额外掩膜，如果不存在则使用全 0
             if 'ptv' in npz:
                 ptv = npz['ptv']
             else:
@@ -89,33 +108,27 @@ class ProcessedSliceDataset(Dataset):
             else:
                 oar_parallel = np.zeros_like(label)
 
-            # --- Layout Metadata ---
-            # 必须与 run_process.py 保存时的键名一致
             if 'isocenter' in npz:
                 isocenter = torch.from_numpy(npz['isocenter']).float()
             else:
-                isocenter = torch.zeros(3).float() # Fallback
+                isocenter = torch.zeros(3).float()
 
             if 'spacing' in npz:
                 spacing = torch.from_numpy(npz['spacing']).float()
             else:
-                spacing = torch.ones(3).float() # Fallback
+                spacing = torch.ones(3).float()
 
             if 'angle_list' in npz:
-                # 之前存的是 object array，取出里面的 list
-                # npz['angle_list'] 可能是 array([list([...]), dtype=object])
                 raw_angles = npz['angle_list']
-                if raw_angles.shape == (): # 0-d array
+                if raw_angles.shape == ():
                     angle_list = raw_angles.item()
                 else:
                     angle_list = raw_angles.tolist()
             else:
-                angle_list = [] # Fallback
+                angle_list = []
             
-            # Serialize angle_list to JSON string to avoid collate errors with variable lengths
             angle_list_str = json.dumps(angle_list)
 
-            # 3. 转为 Tensor
             data = torch.from_numpy(data).float()
             label = torch.from_numpy(label).float()
             body = torch.from_numpy(body).float()
@@ -123,8 +136,6 @@ class ProcessedSliceDataset(Dataset):
             oar_serial = torch.from_numpy(oar_serial).float()
             oar_parallel = torch.from_numpy(oar_parallel).float()
 
-            # --- Augmentation Logic ---
-            # Construct Dictionary for Transforms
             data_dict = {
                 'data': data,
                 'label': label,
@@ -139,7 +150,6 @@ class ProcessedSliceDataset(Dataset):
             else:
                 data_dict = self.val_transforms(data_dict)
             
-            # Update metadata in dict
             data_dict['isocenter'] = isocenter
             data_dict['spacing'] = spacing
             data_dict['angle_list'] = angle_list_str
@@ -147,11 +157,7 @@ class ProcessedSliceDataset(Dataset):
             
             return data_dict
             
-            
-            return data_dict
-            
         except Exception as e:
-            # 遇到错误直接抛出，不再递归重试，以便排查根本原因（通常是数据未生成或路径错误）
             raise RuntimeError(f"Failed to load file at index {idx}: {file_path}. Original error: {str(e)}")
 
 class GetLoader(object):
@@ -164,12 +170,11 @@ class GetLoader(object):
         self.test_root = 'Dataset_256_layout_changechannel_nah&lung/Test'
         
     def train_dataloader(self):
-        # 直接实例化新的 Dataset
         dataset = ProcessedSliceDataset(data_root=self.train_root, cfig=self.cfig, phase='train')
         
         kwargs = {
             'batch_size': self.cfig['train_bs'],
-            'shuffle': True, # 训练集需要打乱
+            'shuffle': True,
             'num_workers': self.cfig['num_workers'],
         }
         if torch.cuda.is_available():
@@ -182,12 +187,11 @@ class GetLoader(object):
         return DataLoader(dataset, **kwargs)
 
     def val_dataloader(self):
-        # 验证集
         dataset = ProcessedSliceDataset(data_root=self.valid_root, cfig=self.cfig, phase='valid')
         
         kwargs = {
             'batch_size': self.cfig['val_bs'],
-            'shuffle': False, # 验证集不需要打乱
+            'shuffle': False,
             'num_workers': self.cfig['num_workers'],
         }
         if torch.cuda.is_available():
@@ -199,12 +203,10 @@ class GetLoader(object):
                 
         return DataLoader(dataset, **kwargs)
 
-    # 兼容旧代码调用的接口
     def train_val_dataloader(self):
         return self.val_dataloader()
     
     def test_dataloader(self):
-        # 测试集
         dataset = ProcessedSliceDataset(data_root=self.test_root, cfig=self.cfig, phase='test')
         
         kwargs = {
@@ -223,15 +225,12 @@ class GetLoader(object):
 
 
 if __name__ == '__main__':
-    # 测试代码
     cfig_path = 'config_files/config_DinoUnetr.yaml'
     
-    # 确保 config 文件能读到，如果路径不对请修改
     if os.path.exists(cfig_path):
         cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
         loader_params = cfig['loader_params']
     else:
-        # 如果找不到 config，给一个默认参数方便测试
         print("Config file not found, using default parameters for testing.")
         loader_params = {
             'train_bs': 4,
@@ -240,26 +239,22 @@ if __name__ == '__main__':
             'prefetch_factor': 2
         }
 
-    # ------------ data loader -----------------#
     loaders = GetLoader(cfig=loader_params)
     
-    # 尝试获取训练数据
     try:
         train_loader = loaders.train_dataloader()
         print("\nStarting DataLoader test...")
         
         for batch_idx, data_dict in enumerate(train_loader):
-            # Forward pass
             print(f"Batch {batch_idx}:")
-            print(f"  - Data shape: {data_dict['data'].shape}")   # 应该是 (B, 6, 224, 224)
-            print(f"  - Label shape: {data_dict['label'].shape}") # 应该是 (B, 1, 224, 224)
-            print(f"  - Body shape: {data_dict['body'].shape}") # 应该是 (B, 1, 224, 224)
+            print(f"  - Data shape: {data_dict['data'].shape}")
+            print(f"  - Label shape: {data_dict['label'].shape}")
+            print(f"  - Body shape: {data_dict['body'].shape}")
             print(f"  - IDs: {data_dict['id']}")
             
-            # 只测试前几个 batch 即可
             if batch_idx >= 2:
                 print("Test finished successfully.")
                 break
     except Exception as e:
         print(f"\n[Test Failed] Could not load data. Reason: {e}")
-        print("请检查当前目录下是否存在 'Dataset/Train' 文件夹以及里面是否有 .npz 文件")
+        print("Check whether the dataset folder and .npz files exist.")

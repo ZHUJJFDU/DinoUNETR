@@ -1,40 +1,20 @@
-# 数据处理与科学计算
+# Core scientific stack
 numpy
 pandas
 scipy
-scikit-learn
-scikit-image
-statsmodels
-xarray
-astropy
-sympy
-networkx
-h5py
-numba
-dask
-distributed
 SimpleITK
 
-# 深度学习与 AI
+# Deep learning
 torch
 torchvision
-timm
-huggingface-hub
-safetensors
-einops
-opencv-python
 monai
-torchdiffeq
+pytorch-lightning
 
-# 数据可视化与交互式应用
+# Computer vision / plotting
+opencv-python
 matplotlib
-seaborn
-plotly
-bokeh
-altair
-holoviews
-hvplot
-datashader
-panel
-streamlit
-tensorboardX
+tensorboard
+tqdm
+
+# Config parsing
+PyYAML

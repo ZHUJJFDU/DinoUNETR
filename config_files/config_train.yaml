@@ -22,17 +22,15 @@ loader_params:
     
     
 model_params:
-    input_channels: 5
+    input_channels: 6
     out_channels: 1
     
 strategy: 'default' # Options: lora, llrd, frozen, adapter, default
-layout: False # True for MED_DINO_UNETR_layout, False for MED_DINO_UNETR
 use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
 use_plus: True # True for MED_DINO_UNETR_plus, False for MED_DINO_UNETR
 
-lr: 0.00002
+lr: 0.0001
 
-max_steps: 1000000
 num_epochs: 200 # Will be ignored/overridden if max_steps is used in Trainer, or used as fallback
 
 act_sig: True

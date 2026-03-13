@@ -1,12 +1,8 @@
-'''
-This script is adapted from the toolkit of below CVPR paper. 
-If you find the functions in this script are helpful to you (for the challenge and beyond), please kindly cite the original pape: 
+"""Utility functions for dose prediction workflows.
 
-Riqiang Gao, Bin Lou, Zhoubing Xu, Dorin Comaniciu, and Ali Kamen. 
-"Flexible-cm gan: Towards precise 3d dose prediction in radiotherapy." 
-In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition, 2023.
-
-'''
+Adapted from: R. Gao et al., "Flexible-cm GAN: Towards precise 3D dose prediction in
+radiotherapy," CVPR 2023.
+"""
 
 import numpy as np
 import cv2
@@ -30,20 +26,10 @@ from monai.transforms import (
 )
 
 
-'''
-Content: 
 
-Section 1: Geometries
-Section 2: DVHs and Visualization
-Section 3: for pytorch data loader
-
-'''
-
-
-
-#---------------------------------------------------------------------------------#
-#--------------------------------- Section 1: Geometries--------------------------#
-#---------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------
+# Section 1: Geometries
+# -----------------------------------------------------------------------------
 
 def PlotGantry(bg_img, angles, x, y, length, width = 4):
 
@@ -55,17 +41,11 @@ def PlotGantry(bg_img, angles, x, y, length, width = 4):
     return bg_img
 
 def interpolate_point_on_line(x1, y1, z1, x2, y2, z2, y_c):
-    """
-    Returns the coordinates of point C on the line segment from (x1, y1, z1) to (x2, y2, z2)
-    with the specified y-coordinate y_c.
-    """
-    # Calculate the ratio of y_c relative to the total y-distance between points A and B
-
+    """Return the point on the segment at a fixed y coordinate."""
     if y2 == y1:
         y2 += 1
     ratio = (y_c - y1) / (y2 - y1)
     
-    # Use linear interpolation to find the corresponding x and z coordinates
     x_c = x1 + ratio * (x2 - x1)
     z_c = z1 + ratio * (z2 - z1)
     
@@ -73,26 +53,19 @@ def interpolate_point_on_line(x1, y1, z1, x2, y2, z2, y_c):
 
 
 def interpolate_line(x1, y1, z1, x2, y2, z2, y_c):
-    """
-    Returns all the coordinates along the line segment from (x1, y1, z1) to (x2, y2, z2).
-    """
-    # Calculate the distance between the points
-
+    """Return all coordinates along the segment to y=y_c."""
     x_c, y_c, z_c = interpolate_point_on_line(x1, y1, z1, x2, y2, z2, y_c)
 
     length = max(abs(x_c - x1), abs(y_c - y1), abs(z_c - z1))
     
-    # Generate linearly spaced coordinates between the points
     x_coords = np.linspace(x1, x_c, length + 1)
     y_coords = np.linspace(y1, y_c, length + 1)
     z_coords = np.linspace(z1, z_c, length + 1)
     
-    # Round coordinates to integers
     x_coords = np.round(x_coords).astype(int)
     y_coords = np.round(y_coords).astype(int)
     z_coords = np.round(z_coords).astype(int)
     
-    # Combine coordinates into tuples
     coordinates = [(x, y, z) for x, y, z in zip(x_coords, y_coords, z_coords)]
     
     return coordinates
@@ -105,9 +78,7 @@ def get_source_from_angle(isocenter, angle, space):
     return points
 
 def get_nonzero_coordinates(binary_mask):
-    """
-    Returns the coordinates of non-zero values in a binary mask.
-    """
+    """Return coordinates of non-zero mask entries."""
     nonzero_coords = np.transpose(np.nonzero(binary_mask))
     return [tuple(coord) for coord in nonzero_coords]
 
@@ -127,14 +98,9 @@ def surface_coordinates(binary_mask):
 
 def get_per_beamplate(PTV_mask, isocenter, space, gantry_angle, with_distance = True):
     
-    # PTV_mask (z, x, y), sicenter = (z, x, y), space = (z, x, y), gantry_angle = float
-
     source = get_source_from_angle(isocenter, gantry_angle, space)
-    #print ('source', source)
-
 
     surface_coords = surface_coordinates(PTV_mask)
-    #print (time.time() - start)
 
     all_points = []
     for point in surface_coords:
@@ -144,17 +110,13 @@ def get_per_beamplate(PTV_mask, isocenter, space, gantry_angle, with_distance = 
             y_c = PTV_mask.shape[1] - 1
         path = interpolate_line(source[0], source[1], source[2], point[0], point[1], point[2], y_c = y_c)
         all_points.extend(path)
-    #print (time.time() - start)
 
     beam_plate = np.zeros_like(PTV_mask).astype(np.uint8)
     for item in set(all_points):
         if item[0] >= 0 and item[0] < PTV_mask.shape[0] and item[1] >= 0 and item[1] < PTV_mask.shape[1] and item[2] >= 0 and item[2] < PTV_mask.shape[2]:
             beam_plate[item[0], item[1], item[2]] = 1
-    #print (time.time() - start)
-    beam_plate = ndimage.binary_dilation(beam_plate, structure=np.ones((4,4,4))) #.astype(PTV_mask.dtype)
-    beam_plate = ndimage.binary_erosion(beam_plate, structure=np.ones((3,3,3))) #.astype(PTV_mask.dtype)
-
-    #print (time.time() - start)
+    beam_plate = ndimage.binary_dilation(beam_plate, structure=np.ones((4,4,4)))
+    beam_plate = ndimage.binary_erosion(beam_plate, structure=np.ones((3,3,3)))
 
     if with_distance:
         x_indices = np.arange(beam_plate.shape[0])
@@ -163,12 +125,10 @@ def get_per_beamplate(PTV_mask, isocenter, space, gantry_angle, with_distance = 
 
         x_coords, y_coords, z_coords = np.meshgrid(x_indices, y_indices, z_indices, indexing='ij')
 
-        # Compute distances using broadcasting
         distances = (x_coords - source[0])**2 + (y_coords - source[1])**2 + (z_coords - source[2])**2
 
         r_dis = ((source[0] - isocenter[0]) ** 2 + (source[1] - isocenter[1]) ** 2 + (source[2] - isocenter[2]) ** 2) / distances 
         beam_plate = beam_plate * r_dis
-        #print (time.time() - start)
 
     return beam_plate
 
@@ -179,20 +139,13 @@ def get_allbeam_plate(PTV_mask, isocenter, space, angles, with_distance = True):
     return all_beam_plate
 
 
-#---------------------------------------------------------------------------------#
-#--------------------- Section 2: DVHs and Visualization -------------------------#
-#---------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------
+# Section 2: DVHs and Visualization
+# -----------------------------------------------------------------------------
 
 
 def getDVH(dose_arr, mask, binsize=0.1, dmax=None):
-    '''
-    Calculate DVH per Region of Interest(ROI)
-    dose_arr: dose array
-    mask: mask of GTV/OAR
-    binsize: bin size of the histogram, default 0.1
-    dmax: maximum dose value for DVH calculation, using max(dose_arr)*110% if not given
-    return: values of dose and DVH
-    '''
+    """Compute a DVH curve for an ROI mask."""
     dosevalues = dose_arr[mask>0]
     
     if dmax is None:
@@ -202,18 +155,7 @@ def getDVH(dose_arr, mask, binsize=0.1, dmax=None):
     return bin_edges, DVH
 
 def NPZ2DVH(roi_dict, needed_mask, ref_ptv_name = None, ref_dose = 70, bin_size = 4, with_plt = True, save_plt_path = None):
-    '''
-    Calculate DVH per plan. 
-    roi_dict: the data dictionary loaded from NPZ file
-    needed_mask: the roi name list wanted to plot in one figure
-    ref_ptv_name: if ref_ptv_name is not None, the dose will be scaled to match D97 (3 percentile dose value of ref ptv) to prescribed dose (i.e., ref_dose)
-    ref_dose: prescribed dose of the reference ptv, only effective when ref_ptv_name is not None
-    bin_size: bin size for the histogram
-    with_plt: plt the figure or not
-    save_plt_path: is not None, the plot figure will be saved to the path
-    
-    return: dvh_dict: the dictionary of all dvh values
-    '''
+    """Compute DVHs for multiple ROIs from an NPZ dictionary."""
     
     if roi_dict['dose'].max() > 200:
         dose_arr = roi_dict['dose'] * roi_dict['dose_scale'] 
@@ -247,9 +189,7 @@ def NPZ2DVH(roi_dict, needed_mask, ref_ptv_name = None, ref_dose = 70, bin_size 
     return dvh_dict
 
 def NormalizeImg(imgVol, maskVol = None):
-    '''
-        Normalize the data to be reasonable scale.
-    '''
+    """Normalize a volume to 0-255 for visualization."""
     i_min, i_max = np.percentile(imgVol, (0.5,99.5))
     if maskVol is not None:
         if maskVol.sum()>0:
@@ -264,10 +204,7 @@ def NormalizeImg(imgVol, maskVol = None):
     return imgVol_norm
 
 def save_screenshot(npz_dict, PTV_name, masked_by_body = True, index = None): 
-    
-    '''
-    save screenshot of the data loaded from npz, this can be used for quality checking
-    '''
+    """Save a representative multi-panel slice for QC."""
     
     if index is None:
         index = np.argmax(npz_dict['dose'].sum(axis = 1).sum(axis = 1))
@@ -298,9 +235,7 @@ def save_screenshot(npz_dict, PTV_name, masked_by_body = True, index = None):
     return save_img
 
 def save_mhd(data, root_dir, filename, spacing=None, origin=None, direction=None ):
-    '''
-    save 3D data to mhd file. mhd file can be opened by itk-snap or some other tools
-    '''
+    """Save a 3D volume to an MHD file."""
 
     if not os.path.exists(root_dir):
         os.makedirs(root_dir)
@@ -314,19 +249,12 @@ def save_mhd(data, root_dir, filename, spacing=None, origin=None, direction=None
     sitk.WriteImage(volume, root_dir + f'/' + filename + '.mhd')
     return
 
-#---------------------------------------------------------------------------------#
-#----------------- Section 3: for pytorch data loader ----------------------------#
-#---------------------------------------------------------------------------------#
+# -----------------------------------------------------------------------------
+# Section 3: PyTorch data loader helpers
+# -----------------------------------------------------------------------------
 
 def calculate_distance_to_tumor(tmp_dict,distance_map,need_list, OAR_PRIORITY):
-    '''
-    this function is used to support the data loader.
-    tmp_dict: the dictionary of the data loaded from the npz file
-    distance_map: the distance map to tumor surface
-    need_list: the list of the OARs needed to be combined
-    OAR_PRIORITY: the priority of the OARs, the key is the name of the OAR, the value is the priority of the OAR protection
-    OAR_isDmax: the dictionary of the OARs, the key is the name of the OAR, the value is the flag of the OAR, if True, the OAR planning objective is Dmax
-    '''
+    """Combine OAR distance maps using priority weighting."""
     comb_oar_distance = np.zeros(distance_map.shape)
 
     for key in OAR_PRIORITY.keys():
@@ -339,15 +267,6 @@ def calculate_distance_to_tumor(tmp_dict,distance_map,need_list, OAR_PRIORITY):
             single_oar = np.zeros(distance_map.shape)
 
         distance_map_oar = distance_map * single_oar
-        # if OAR_isDmax[key] and priority < 3:
-
-        #     distance_value = torch.quantile(distance_map[distance_map > 0], 0.05)
-        # else:
-        #     distance_value = torch.mean(distance_map[distance_map > 0])
-        
-        # t = 1.3
-        # s = 30
-        # distance_weight = t / (1 + torch.exp(distance_value/s - 1.204))
         t = 1.3
         s = 20
         distance_map_oar[distance_map_oar > 0] = t / (1 + np.exp(distance_map_oar[distance_map_oar > 0]/s - 1.204))
@@ -358,15 +277,7 @@ def calculate_distance_to_tumor(tmp_dict,distance_map,need_list, OAR_PRIORITY):
 
 
 def oar_mask(tmp_dict, need_list, OAR_PRIORITY,OAR_isDmax):
-
-    '''
-    this function is used to support the data loader. 
-
-    tmp_dict: the dictionary of the data loaded from the npz file
-    need_list: the list of the OARs needed to be combined
-    norm_oar: if True, the OARs will be normalized to the same scale
-    OAR_DICT: the dictionary of the OARs, the key is the name of the OAR, the value is the index of the OAR in the combined
-    '''
+    """Create serial/parallel OAR masks based on planning objective type."""
     
     oar_serial = np.zeros(tmp_dict['img'].shape)  
     oar_parallel = np.zeros(tmp_dict['img'].shape)
@@ -392,15 +303,7 @@ def oar_mask(tmp_dict, need_list, OAR_PRIORITY,OAR_isDmax):
 
 
 def combine_oar_priority(tmp_dict, need_list, OAR_PRIORITY):
-
-    '''
-    this function is used to support the data loader. 
-
-    tmp_dict: the dictionary of the data loaded from the npz file
-    need_list: the list of the OARs needed to be combined
-    norm_oar: if True, the OARs will be normalized to the same scale
-    OAR_DICT: the dictionary of the OARs, the key is the name of the OAR, the value is the index of the OAR in the combined
-    '''
+    """Combine OAR masks with exponential priority weighting."""
     
     comb_oar = torch.zeros(tmp_dict['img'].shape)  
 
@@ -421,15 +324,7 @@ def combine_oar_priority(tmp_dict, need_list, OAR_PRIORITY):
     return comb_oar
 
 def combine_oar(tmp_dict, need_list,norm_oar = True, OAR_DICT = None):
-
-    '''
-    this function is used to support the data loader. 
-
-    tmp_dict: the dictionary of the data loaded from the npz file
-    need_list: the list of the OARs needed to be combined
-    norm_oar: if True, the OARs will be normalized to the same scale
-    OAR_DICT: the dictionary of the OARs, the key is the name of the OAR, the value is the index of the OAR in the combined
-    '''
+    """Combine OAR masks into a single weighted map and one-hot stack."""
     
     comb_oar = torch.zeros(tmp_dict['img'].shape)  
     cat_oar = torch.zeros([32] + list(tmp_dict['img'].shape)[1:])
@@ -483,11 +378,8 @@ def combine_ptv(tmp_dict,  scaled_dose_dict):
     return comb_ptv, prescribed_dose, cat_ptv 
 
 def calculate_min_distance_to_tumor_surface(tumor_mask, spacing):
-    # Ensure the tumor mask is binary
+    """Compute distance to the nearest tumor voxel."""
     tumor_mask = tumor_mask > 0
-
-    # Calculate the distance transform of the inverse of the tumor mask
-    # This gives the distance from each voxel to the nearest tumor voxel
 
     min_distance_array = distance_transform_edt(~tumor_mask, sampling=spacing)
 
@@ -497,9 +389,7 @@ def calculate_min_distance_to_tumor_surface(tumor_mask, spacing):
     return min_distance_array
 
 def expand_roi(roi_mask, spacing, expansion_distance):
-    '''
-    expand the ROI by the expansion_distance
-    '''
+    """Expand an ROI mask by a fixed physical distance."""
     roi_mask = roi_mask > 0
     min_distance_array = distance_transform_edt(~roi_mask, sampling=spacing)
     expanded_roi = min_distance_array <= expansion_distance
@@ -507,9 +397,7 @@ def expand_roi(roi_mask, spacing, expansion_distance):
     return expanded_roi
 
 def HU2electron_density(HU_map):
-    '''
-    HU_map: the CT map in HU value. 
-    '''
+    """Convert HU values to electron density."""
     HU_map = np.clip(HU_map, -1000.0, 6000.0)
     HU_Conversion_Point = np.array([-1000.0,100.0,1000.0,6000.0])
     ED_Conversion_Point = np.array([0.0, 1.1, 1.532, 3.920])
@@ -517,9 +405,7 @@ def HU2electron_density(HU_map):
     return ED_map
 
 def HU2mass_density(HU_map):
-    '''
-    HU_map: the CT map in HU value. 
-    '''
+    """Convert HU values to mass density."""
     HU_map = np.clip(HU_map, -976.0, 2832.0)
     HU_Conversion_Point = np.array([-976.0, -480.0, -96.0, 0.0, 48.0, 128.0, 528.0, 976.0, 1488.0, 1824.0, 2224.0, 2640.0, 2832.0])
     MD_Conversion_Point = np.array([0.001 , 0.5   , 0.95 , 1.0, 1.05, 1.1  , 1.334, 1.603, 1.85  , 2.1   , 2.4   , 2.7   , 2.83])
@@ -545,56 +431,33 @@ def tr_augmentation(KEYS, in_size, out_size, crop_center):
     ])
 
 def tt_augmentation(KEYS, in_size, out_size, crop_center):
-    """
-        直接Resize到out_size
-    """
+    """Resize to out_size."""
     return Compose([
         Resized(keys = KEYS, spatial_size = out_size, allow_missing_keys = True), 
     ])
 
 
 def compute_pca_projection(feature_map, n_components=3):
-    """
-    使用 PyTorch 在 GPU 上计算 PCA 并将特征图转换为 RGB 图像。
-    
-    Args:
-        feature_map: Tensor, shape [C, H, W] (单张图片的特征)
-        n_components: int, 降维目标通道数 (通常为 3 对应 RGB)
-    Returns:
-        rgb_img: Tensor, shape [3, H, W], 值域 [0, 1]
-    """
-    # 强制禁用混合精度，确保 PCA/SVD 在 FP32 下运行
+    """Project a feature map to RGB using PCA on GPU."""
     with torch.amp.autocast('cuda', enabled=False):
-        # 强制转换为 float32
         feature_map = feature_map.float()
 
-        # 1. 调整形状: [C, H, W] -> [H*W, C]
         C, H, W = feature_map.shape
-        flat_features = feature_map.flatten(1).T  # shape [N, C], N=H*W
+        flat_features = feature_map.flatten(1).T
         
-        # 2. 标准化 (Centering)
         mean = flat_features.mean(dim=0, keepdim=True)
         centered_features = flat_features - mean
         
-        # 3. 执行 PCA (使用 torch.pca_lowrank 加速)
-        # U, S, V = torch.pca_lowrank(centered_features, q=n_components, center=False) 
-        # projected = torch.matmul(centered_features, V[:, :n_components]) 
-        
-        # 或者更简单的 SVD (对于较小的 H*W 也可以)
         try:
             U, S, V = torch.svd_lowrank(centered_features, q=n_components)
-            projected = torch.matmul(centered_features, V) # [N, 3]
+            projected = torch.matmul(centered_features, V)
         except:
-            # Fallback if SVD fails (rare)
             return torch.zeros(3, H, W).to(feature_map.device)
 
-        # 4. 归一化到 [0, 1] 用于显示
-        # 对每个通道分别归一化，或者整体归一化
         p_min = projected.min()
         p_max = projected.max()
         projected = (projected - p_min) / (p_max - p_min + 1e-6)
         
-        # 5. 还原形状 [N, 3] -> [3, H, W]
         rgb_img = projected.T.view(n_components, H, W)
         
         return rgb_img

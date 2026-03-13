@@ -3,18 +3,16 @@ import sys
 import torch
 import torch.nn as nn
 from torchdiffeq import odeint
-# Ensure we can import from the local dinov3 package
+# Allow local dinov3 imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
 
 from dinov3.models.vision_transformer import vit_base
 
-# --- Backbone Adapter ---
 class MedDINOv3Backbone(nn.Module):
     def __init__(self, checkpoint_path, input_dim=6):
         super().__init__()
-        # 1. Initialize model with MedDINOv3 specific parameters
         self.model = vit_base(
             img_size=256, 
             patch_size=16,
@@ -25,14 +23,12 @@ class MedDINOv3Backbone(nn.Module):
             mask_k_bias=True
         )
         
-        # 2. Load weights
         self._load_weights(checkpoint_path)
 
-        # 3. Adapt channels if necessary
         if input_dim != 3:
             self.adapt_channels(input_dim)
 
-        self.out_indices = [2, 5, 8, 11] # 0-indexed layers 3, 6, 9, 12
+        self.out_indices = [2, 5, 8, 11]
 
     def _load_weights(self, checkpoint_path):
         if checkpoint_path and os.path.exists(checkpoint_path):
@@ -44,27 +40,22 @@ class MedDINOv3Backbone(nn.Module):
                 else:
                     state_dict = chkpt
                 
-                # Filter out incompatible keys (like ibot head) and remove prefixes
+                # Strip non-backbone heads and prefixes
                 new_state_dict = {}
                 for k, v in state_dict.items():
                     if 'ibot' in k or 'dino_head' in k:
                         continue
-                    # Remove 'backbone.' prefix if present
                     new_key = k.replace('backbone.', '')
                     new_state_dict[new_key] = v
                 
-                # Load weights (strict=False to allow for some mismatch, e.g. pos_embed resizing if needed)
                 missing, unexpected = self.model.load_state_dict(new_state_dict, strict=False)
                 print(f"Weights loaded. Missing keys: {len(missing)}, Unexpected keys: {len(unexpected)}")
-                if len(missing) > 0:
-                    print(f"First few missing: {missing[:5]}")
             except Exception as e:
                 print(f"Error loading weights: {e}")
         else:
             print(f"Warning: Checkpoint {checkpoint_path} not found. Using random initialization.")
 
     def adapt_channels(self, input_dim):
-        # print(f"Adapting first layer from 3 to {input_dim} channels...")
         patch_embed_layer = self.model.patch_embed.proj
         
         original_weights = patch_embed_layer.weight.data
@@ -82,19 +73,17 @@ class MedDINOv3Backbone(nn.Module):
         )
         
         with torch.no_grad():
-            # Copy first 3 channels
+            # Copy RGB weights; init extra channels to zero
             new_layer.weight[:, :3, :, :] = original_weights[:, :3, :, :]
-            # Zero init remaining channels
             if new_in_channels > 3:
                 new_layer.weight[:, 3:, :, :] = 0
-            # Copy bias
             if original_bias is not None:
                 new_layer.bias.data.copy_(original_bias.data)
                 
         self.model.patch_embed.proj = new_layer
 
     def forward(self, x):
-        # Local DINOv3 implementation returns (B, C, H, W) when reshape=True
+        # DINOv3 returns (B, C, H, W) when reshape=True
         features = self.model.get_intermediate_layers(
             x, 
             n=self.out_indices, 
@@ -102,7 +91,6 @@ class MedDINOv3Backbone(nn.Module):
         )
         return features
 
-# --- Decoder Blocks ---
 class SingleDeconv2DBlock(nn.Module):
     def __init__(self, in_planes, out_planes):
         super().__init__()
@@ -163,14 +151,14 @@ class Deconv2DBlock(nn.Module):
 class nmODEFunc(nn.Module):
     def __init__(self):
         super(nmODEFunc, self).__init__()
-        self.gamma = None # 用于存储外部驱动 F(x)
+        self.gamma = None  # External drive F(x)
         
     def fresh(self, gamma):
-        """注入外部驱动力 F(x)"""
+        """Inject the external drive F(x)."""
         self.gamma = gamma
         
     def forward(self, t, p):
-        # 论文公式: dy/dt = -y + sin^2(y + F(x))
+        # dy/dt = -y + sin^2(y + F(x))
         dpdt = -p + torch.sin(p + self.gamma)**2
         return dpdt
 
@@ -188,32 +176,21 @@ class nmODEBlock(nn.Module):
         self.out_conv = nn.Conv2d(channels, channels, 1)
 
     def forward(self, x):
-        # 1. 计算外部驱动 F(x)
+        # Solve ODE with residual refinement
         drive = self.drive_conv(x)
-        
-        # 2. 注入驱动力到 ODE 函数中
         self.odefunc.fresh(drive)
-        
-        # 3. 定义初始状态 y(0)
-        # 优化: 初始状态 y0 = x (从特征本身开始演化)
         y0 = x
-        
-        # 4. 求解 ODE (积分时间 0 -> 1)
         times = torch.tensor([0, 1.0]).type_as(x)
         out = odeint(self.odefunc, y0, times, method='rk4')[1]
-        
-        # 5. 输出变换 + 残差连接 
-        # Output = Conv(ODE(x)) + x
         return self.out_conv(out) + x
 
-# --- Main Model ---
 class MED_DINO_UNETR(nn.Module):
     def __init__(self, checkpoint_path, embed_dim=768, input_dim=6, output_dim=1):
         super().__init__()
-        # 1. Use the new MedDINOv3 Backbone
+        # MedDINOv3 backbone
         self.backbone = MedDINOv3Backbone(checkpoint_path, input_dim)
 
-        # 2. U-Net Decoder (Same as before)
+        # U-Net decoder
         self.decoder0 = nn.Sequential(
             Conv2DBlock(input_dim, 32, 3), 
             Conv2DBlock(32, 64, 3)
@@ -253,22 +230,19 @@ class MED_DINO_UNETR(nn.Module):
             nn.Conv2d(128, 32, kernel_size=3, padding=1), 
             nn.GroupNorm(8, 32),
             nn.LeakyReLU(0.1, inplace=False),
-            # 优化: 在 32 通道上进行非线性动力学修正 (特征维度更高)
+            # Nonlinear dynamical refinement at 32 channels
             nmODEBlock(channels=32),
             
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.1, inplace=False),
-            # 最终输出层 (16 -> output_dim)
             nn.Conv2d(16, output_dim, kernel_size=1),
-            nn.Softplus() # 保持 Softplus 因为剂量必须 > 0
+            nn.Softplus()  # Dose must be positive
         )
     
     def forward(self, x):
         features = self.backbone(x)
-        f0, f3, f6, f9, f12 = x, features[0], features[1], features[2], features[3] # 1,768,16,16
-        
-        # print(f0.shape, f3.shape, f6.shape, f9.shape, f12.shape)
+        f0, f3, f6, f9, f12 = x, features[0], features[1], features[2], features[3]
         
         f12 = self.decoder12_upsampler(f12)
         f9 = self.decoder9(f9)
@@ -282,14 +256,11 @@ class MED_DINO_UNETR(nn.Module):
         return output, features[1], features[3]
 
 if __name__ == '__main__':
-    # Define checkpoint path
     ckpt_path = r"c:\Users\960\Desktop\DinoUNETR\dino_unetr\model.pth"
     
     print(f"Initializing MED_DINO_UNETR with checkpoint: {ckpt_path}")
     model = MED_DINO_UNETR(checkpoint_path=ckpt_path)
-    # print(model)
     
-    # Test Forward Pass
     print("\nTesting forward pass...")
     input_tensor = torch.randn(1, 6, 256, 256)
     try:

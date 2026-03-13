@@ -30,12 +30,11 @@ class MyDataset(Dataset):
         
         df = pd.read_csv(cfig['csv_root'])
         
-        df = df.loc[(df['phase'] == phase) & (df['dev_split'] == dev_split)] # 筛选phase和dev_split对应的样本
+        df = df.loc[(df['phase'] == phase) & (df['dev_split'] == dev_split)]
 
         self.phase = phase
         self.dev_split = dev_split
 
-        # Pandas Series转化为Python List 后续操作更快
         self.data_list = df['npz_path'].tolist()
         self.site_list = df['site'].tolist()
         self.cohort_list = df['cohort'].tolist()
@@ -48,20 +47,7 @@ class MyDataset(Dataset):
         return len(self.data_list)
     
     def __getitem__(self, index):
-        """
-        data_dict:
-            'label' 目标标签 (z,y,x)
-            'ref_5Gy_mask' 大于5Gy掩码 (z,y,x)
-            'data' 	带处方剂量的PTVs 带优先级权重的OARs OAR到PTV的距离图 人体二进制掩模 质量密度图 归一化距离感知射束板 6个向量沿通道维度拼接在一起
-            'Body' 人体二进制掩模 (z,y,x)
-            'PTV_expanded' 扩展后的经用人体掩膜的PTV掩模 (z,y,x)
-            'PTV' 经用人体掩膜的PTV掩模 (z,y,x)
-            'oar_serial' 经用人体掩膜的串行器官掩模 (z,y,x)
-            'oar_parallel' 经用人体掩膜的并行器官掩模 (z,y,x)
-            'ori_isocenter' 原始数据旋转中心坐标 (z,y,x)
-            'ori_img_size' 原始数据大小 (z,y,x)
-            'id' 样本ID 字符串类型
-        """ 
+        """Load a single volume and build training tensors."""
 
         data_path = self.data_list[index]
         ID = self.data_list[index].split('/')[-1].replace('.npz', '')
@@ -83,21 +69,18 @@ class MyDataset(Dataset):
         
         KEYS = list(In_dict.keys())
         for key in In_dict.keys(): 
-            if isinstance(In_dict[key], np.ndarray) and len(In_dict[key].shape) == 3: # 是否是3维NumPy数组类型
-                In_dict[key] = torch.from_numpy(In_dict[key].astype('float'))[None] # 转换为PyTorch Tensor 并添加通道维度
+            if isinstance(In_dict[key], np.ndarray) and len(In_dict[key].shape) == 3:
+                In_dict[key] = torch.from_numpy(In_dict[key].astype('float'))[None]
             else:
                 KEYS.remove(key)
-        # 训练集可选数据增强
         if self.phase == 'train':
             if 'with_aug' in self.cfig.keys() and not self.cfig['with_aug']:
                 self.aug = tt_augmentation(KEYS, self.cfig['in_size'],  self.cfig['out_size'], isocenter)
             else:
                 self.aug = tr_augmentation(KEYS, self.cfig['in_size'], self.cfig['out_size'], isocenter)
-        # 测试集不使用数据增强
         if self.phase in ['val', 'test', 'valid', 'external_test'] or self.dev_split in ['test','valid']:
             self.aug = tt_augmentation(KEYS, self.cfig['in_size'], self.cfig['out_size'], isocenter)
 
-        # 应用数据增强
         In_dict = self.aug(In_dict)
         for k in list(In_dict.keys()):
             v = In_dict[k]
@@ -105,7 +88,6 @@ class MyDataset(Dataset):
                 v[torch.isnan(v)] = 0
                 v[torch.isinf(v)] = 0
                 In_dict[k] = v
-        # 创建一个空字典
         data_dict = dict()
 
         if 'label' in In_dict.keys():
@@ -139,10 +121,10 @@ class MyDataset(Dataset):
         data_dict['oar_serial'] = In_dict['oar_serial'] * In_dict['Body']
         data_dict['oar_parallel'] = In_dict['oar_parallel'] * In_dict['Body']
         
-        # layout tokens
+        # Layout tokens
         data_dict['ori_isocenter'] = torch.tensor(isocenter)
         data_dict['spacing'] = torch.tensor(spacing)
-        # Keep angle_list as raw list to handle variable lengths; network will handle resampling
+        # Keep angle_list as raw list to handle variable lengths
         data_dict['angle_list'] = angle_list
 
         data_dict['ori_img_size'] = torch.tensor(ori_img_size)
@@ -150,9 +132,6 @@ class MyDataset(Dataset):
         # data_dict['direction'] = torch.tensor(In_dict['direction'])
         
         del In_dict
-        # print(data_dict['data'].shape) # C D H W
-        # print(data_dict['label'].shape) # C D H W
-
         return data_dict
     
 class GetLoader(object):
@@ -239,9 +218,7 @@ if __name__ == '__main__':
     
     print("Starting DataLoader test...")
     for batch_idx, data_dict in enumerate(train_loader):
-            # Forward pass
             print(f"Batch {batch_idx}: Data shape: {data_dict['data'].shape}, Label shape: {data_dict['label'].shape}")
-            # 只测试前几个 batch 即可，避免跑太久
             if batch_idx >= 2:
                 print("Test finished.")
                 break
