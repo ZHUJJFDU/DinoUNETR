@@ -47,11 +47,11 @@ class GDPDistanceLightningModel(pl.LightningModule):
         self.num_epochs = cfig['num_epochs']
         self.sig_act = nn.Sigmoid()
 
-        self.use_plus = cfig.get('use_plus', False)
+        self.use_nmODE = cfig.get('use_nmODE', False)
 
-        if self.use_plus:
+        if self.use_nmODE:
             print(f">>> Using MED_DINO_UNETR_distance_nmODE (Input Dim: {input_dim})")
-            self.model = MED_DINO_UNETR_distance_nmODE(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
+            self.model = MED_DINO_UNETR_Distance_nmODE(checkpoint_path='dino_unetr\model.pth', input_dim=input_dim)
 
         if self.strategy == 'lora':
             print(">>> Strategy: LoRA Enabled (Applied to Backbone).")

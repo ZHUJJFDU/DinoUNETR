@@ -343,8 +343,8 @@ class MED_DINO_UNETR_Distance_nmODE(nn.Module):
 if __name__ == '__main__':
     ckpt_path = r"c:\Users\960\Desktop\DinoUNETR\dino_unetr\model.pth"
     
-    print(f"Initializing MED_DINO_UNETR_Distance...")
-    model = MED_DINO_UNETR_Distance(checkpoint_path=ckpt_path)
+    print(f"Initializing MED_DINO_UNETR_Distance_nmODE...")
+    model = MED_DINO_UNETR_Distance_nmODE(checkpoint_path=ckpt_path)
     
     print("\nTesting forward pass...")
     input_tensor = torch.randn(1, 6, 256, 256) 
