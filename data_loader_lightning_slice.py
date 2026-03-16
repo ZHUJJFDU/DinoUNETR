@@ -40,9 +40,12 @@ class ProcessedSliceDataset(Dataset):
         self.out_size = cfig.get('out_size', [96, 256, 256])
         self.target_h = self.out_size[1]
         self.target_w = self.out_size[2]
+        self.target_size = [self.target_h, self.target_w]
         
+        self.keys = ['data', 'label', 'body', 'ptv', 'oar_serial', 'oar_parallel']
+        self.modes = ['bilinear', 'bilinear', 'nearest', 'nearest', 'nearest', 'nearest']
+
         self.train_transforms = Compose([
-            # 1. Random Spatial Crop (Directly from source or with minimal scaling)
             RandSpatialCropd(
                 keys=self.keys, 
                 roi_size=[int(self.target_h * 0.9), int(self.target_w * 0.9)], 
@@ -51,32 +54,26 @@ class ProcessedSliceDataset(Dataset):
                 random_size=True, 
                 allow_missing_keys=True
             ),
-            
-            # 2. Random Rotate (Reduced prob to 0.5 for better stability)
             RandRotated(
                 keys=self.keys, 
                 prob=0.5, 
                 range_x=0.2, 
-                mode=modes, 
+                mode=self.modes, 
                 padding_mode='zeros', 
                 allow_missing_keys=True
             ),
-            
-            # 3. Random Flip (Reduced prob)
             RandFlipd(keys=self.keys, prob=0.3, spatial_axis=0, allow_missing_keys=True),
             RandFlipd(keys=self.keys, prob=0.3, spatial_axis=1, allow_missing_keys=True),
-            
-            # 4. Final Resize to target size (The ONLY scaling step that determines fixed size)
             Resized(
                 keys=self.keys, 
-                spatial_size=target_size, 
-                mode=modes, 
+                spatial_size=self.target_size, 
+                mode=self.modes, 
                 allow_missing_keys=True
             )
         ])
         
         self.val_transforms = Compose([
-             Resized(keys=self.keys, spatial_size=target_size, mode=modes, allow_missing_keys=True)
+             Resized(keys=self.keys, spatial_size=self.target_size, mode=self.modes, allow_missing_keys=True)
         ])
 
 

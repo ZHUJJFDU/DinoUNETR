@@ -2,6 +2,7 @@ import os
 import sys
 import torch
 import torch.nn as nn
+from torchdiffeq import odeint
 
 # Allow local dinov3 imports
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -153,7 +154,7 @@ class CrossAttentionFusion(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
-
+        self.gamma = nn.Parameter(torch.zeros(1))
     def forward(self, x_main, x_geo):
         """Cross-attend geometry into DINO features."""
         B, C, H, W = x_main.shape
@@ -174,7 +175,6 @@ class CrossAttentionFusion(nn.Module):
         x = self.proj_drop(x)
         
         out = x.transpose(1, 2).reshape(B, C, H, W)
-        self.gamma = nn.Parameter(torch.zeros(1))
         return x_main + self.gamma * out
 
 class SingleDeconv2DBlock(nn.Module):
@@ -244,10 +244,10 @@ class nmODEBlock(nn.Module):
         # Compute the external drive and solve the ODE over [0, 1]
         drive = self.drive_conv(x)
         self.odefunc.fresh(drive)
-        y0 = torch.zeros_like(x)
+        y0 = x
         times = torch.tensor([0, 1.0]).type_as(x)
         out = odeint(self.odefunc, y0, times, method='rk4')[1]
-        return self.out_conv(out)
+        return self.out_conv(out) + x
 
 class MED_DINO_UNETR_Distance_nmODE(nn.Module):
     def __init__(self, checkpoint_path, embed_dim=768, input_dim=6, output_dim=1):

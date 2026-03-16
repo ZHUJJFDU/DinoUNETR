@@ -3,7 +3,7 @@ import sys
 import torch
 import torch.nn as nn
 from torchdiffeq import odeint
-# Allow local dinov3 imports
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.append(current_dir)
@@ -232,7 +232,6 @@ class MED_DINO_UNETR(nn.Module):
             nn.LeakyReLU(0.1, inplace=False),
             # Nonlinear dynamical refinement at 32 channels
             nmODEBlock(channels=32),
-            
             nn.Conv2d(32, 16, kernel_size=3, padding=1),
             nn.GroupNorm(8, 16),
             nn.LeakyReLU(0.1, inplace=False),
