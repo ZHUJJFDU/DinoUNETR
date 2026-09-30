@@ -1,41 +1,36 @@
-
-
-loader_params: 
-
-    'train_bs': 1
-    'val_bs': 1
-    'csv_root': 'meta_files/meta_data_train_Nah&Lung.csv'
-    'csv_HaN_OAR_priority_root': 'meta_files/HaN_OAR_update.csv'
-    'csv_LUNG_OAR_priority_root': 'meta_files/LUNG_OAR_update.csv'
-    'scale_dose_dict': 'meta_files/PTV_DICT.json'
-    'pat_obj_dict': 'meta_files/Pat_Obj_DICT.json'
-    'num_workers': 0
-
-    'down_HU': -1000
-    'up_HU': 1000
-    'denom_norm_HU': 500
-
-    'in_size': [96, 256, 256]
-    'out_size': [96, 256, 256]
-
-    'CatStructures': False
-    'dose_div_factor': 10 
-    
-strategy: 'default' # Options: lora, llrd, frozen, adapter, default
-use_nmODE: False # True for MED_DINO_UNETR_nmODE, False for MED_DINO_UNETR
-use_plus: True # True for MED_DINO_UNETR_plus, False for MED_DINO_UNETR
+loader_params:
+    train_bs: 1
+    val_bs: 1
+    csv_root: meta_files/meta_data_train_Nah&Lung.csv
+    csv_HaN_OAR_priority_root: meta_files/HaN_OAR_update.csv
+    csv_LUNG_OAR_priority_root: meta_files/LUNG_OAR_update.csv
+    scale_dose_dict: meta_files/PTV_DICT.json
+    pat_obj_dict: meta_files/Pat_Obj_DICT.json
+    num_workers: 0
+    train_root: Dataset_256_DoseDINO/Train
+    valid_root: Dataset_256_DoseDINO/Valid
+    test_root: Dataset_256_DoseDINO/Test
+    with_aug: false
+    down_HU: -1000
+    up_HU: 1000
+    denom_norm_HU: 500
+    in_size: [96, 256, 256]
+    out_size: [96, 256, 256]
+    CatStructures: false
+    dose_div_factor: 10
 
 model_params:
     input_channels: 6
     out_channels: 1
+    checkpoint_path: dino_unetr/model.pth
+    rk4_steps: 4
 
+strategy: default
 lr: 0.0001
-num_epochs: 120
-
-act_sig: False
+weight_decay: 0.0001
+num_epochs: 200
 scale_out: 7.5
-
-
-model_from_lightning: True
-save_model_path: trained_models\trained_model_default_256_meddino_distance_nah&lung\dinounetr-best-val-epoch=160-val_loss=0.1808.ckpt
-save_pred_path: results\result_default_256_meddino_distance_nah&lung
+scale_loss: 4
+model_from_lightning: true
+save_model_path: trained_models/dosedino/dosedino-best-val.ckpt
+save_pred_path: results/dosedino
