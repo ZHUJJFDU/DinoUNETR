@@ -36,6 +36,7 @@ When the pretrained DINOv3 projection is expanded from three to five channels, i
 - `config_files/`: training and inference configuration.
 
 Former MED-DINO-UNETR module and entrypoint names remain as thin compatibility imports. New work should use the DoseDINO names above.
+The legacy names now select the paper implementation; they do not reproduce the historical model's CDD behavior or channel ordering.
 
 ## Environment
 
@@ -95,6 +96,6 @@ Predicted axial slices are resized to the source in-plane size and stacked into 
 
 ## Reproducibility notes
 
-- The CDD latent state starts from `y(0)=0` and is integrated over `[0, 1]` with exactly four classical RK4 steps.
+- The CDD latent state starts from `y(0)=0` and is integrated over `[0, 1]` with exactly four classical RK4 steps (`h=0.25`, 16 dynamics evaluations). The decoder features provide `G(x)`; the block returns the projected final state without adding a residual `x`, and the complete dose head ends in Softplus.
 - Validation and testing are separate: validation uses `(phase=train, dev_split=valid)`, while testing uses `(phase=valid, dev_split=test)`.
 - Statistical comparisons reported in the paper are paired at the reconstructed-plan level, not at the slice or voxel level.

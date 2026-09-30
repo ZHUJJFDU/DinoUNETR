@@ -264,7 +264,11 @@ class CDDDynamics(nn.Module):
 
 
 class FixedStepCDD(nn.Module):
-    """Continuous dose dynamics integrated by exactly four RK4 steps."""
+    """Paper CDD: y(0)=0, integrated on [0, 1] by four classical RK4 steps.
+
+    Each step has size 0.25 and evaluates the dynamics four times. The
+    integrated state is projected by ``out_conv`` without a residual ``+x``.
+    """
 
     def __init__(self, channels: int, num_steps: int = 4):
         super().__init__()
@@ -281,6 +285,7 @@ class FixedStepCDD(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         drive = self.drive_conv(x)
+        # Decoder features supply the drive, not the initial latent state.
         y = torch.zeros_like(x)
         step_size = 1.0 / self.num_steps
         for _ in range(self.num_steps):
@@ -386,7 +391,8 @@ class DoseDINO(nn.Module):
         return dose, f6, f12_fused
 
 
-# Backward-compatible names for checkpoints and scripts from the development repo.
+# Legacy import names resolve to the paper implementation. These aliases do not
+# preserve the numerical behavior of the historical CDD or its input ordering.
 MedDINOv3Backbone = DINOv3Encoder
 GeometryEncoder = PGIEncoder
 CrossAttentionFusion = DirectedAttention

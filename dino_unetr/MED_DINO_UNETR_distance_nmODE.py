@@ -1,6 +1,7 @@
 """Compatibility imports for the former model module.
 
 Use :mod:`dino_unetr.dosedino` for the paper-aligned names.
+These imports use the paper CDD implementation, not the historical solver.
 """
 
 from .dosedino import (
