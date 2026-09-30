@@ -59,14 +59,15 @@ class ProcessDataset(MyDataset):
         if 'PTV_expanded' in In_dict:
             In_dict['PTV_expanded'] = (In_dict['PTV_expanded'] > 0.5).type(torch.FloatTensor)
 
-        # Concatenate data channels (distance excluded)
+        # Paper order: CT, PTV prescription, OAR priority, body, beam, distance.
         try:
              data_dict['data'] = torch.cat((
                 In_dict['mass_density'], 
                 In_dict['comb_optptv'],  
                 In_dict['comb_oar_priority'],  
+                In_dict['Body'],
                 In_dict['beam_plate_norm'],
-                In_dict['Body']
+                In_dict['comb_oar_distance'],
             ), axis=0)
         except KeyError as e:
             print(f"Warning: Missing key {e} for {ID}")
@@ -141,16 +142,17 @@ def process_one_case(index):
 def main():
     global GLOBAL_DATASET, SAVE_ROOT
     
-    cfig_path = 'config_files/config_DinoUnetr.yaml' 
+    cfig_path = 'config_files/config_train.yaml'
     max_workers = 4 
 
     print("Loading configuration...")
     cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
 
+    loader_config = cfig['loader_params']
     tasks = [
-        ('Dataset_128160_layout_changechannel_nah&lung/Train', 'train', 'train'),
-        ('Dataset_128160_layout_changechannel_nah&lung/Valid', 'train', 'valid'),
-        ('Dataset_128160_layout_changechannel_nah&lung/Test',  'valid', 'test')
+        (loader_config.get('train_root', 'Dataset_256_DoseDINO/Train'), 'train', 'train'),
+        (loader_config.get('valid_root', 'Dataset_256_DoseDINO/Valid'), 'train', 'valid'),
+        (loader_config.get('test_root', 'Dataset_256_DoseDINO/Test'), 'valid', 'test'),
     ]
 
     for task_idx, (save_dir, phase, dev_split) in enumerate(tasks):

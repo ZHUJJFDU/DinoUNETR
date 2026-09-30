@@ -74,10 +74,10 @@ class MyDataset(Dataset):
             else:
                 KEYS.remove(key)
         if self.phase == 'train':
-            if 'with_aug' in self.cfig.keys() and not self.cfig['with_aug']:
-                self.aug = tt_augmentation(KEYS, self.cfig['in_size'],  self.cfig['out_size'], isocenter)
-            else:
+            if self.cfig.get('with_aug', False):
                 self.aug = tr_augmentation(KEYS, self.cfig['in_size'], self.cfig['out_size'], isocenter)
+            else:
+                self.aug = tt_augmentation(KEYS, self.cfig['in_size'], self.cfig['out_size'], isocenter)
         if self.phase in ['val', 'test', 'valid', 'external_test'] or self.dev_split in ['test','valid']:
             self.aug = tt_augmentation(KEYS, self.cfig['in_size'], self.cfig['out_size'], isocenter)
 
@@ -98,21 +98,14 @@ class MyDataset(Dataset):
         In_dict['Body'] = (In_dict['Body'] > 0.5).type(torch.FloatTensor)
         In_dict['PTV_expanded'] = (In_dict['PTV_expanded'] > 0.5).type(torch.FloatTensor)
 
-        # data_dict['data'] = torch.cat((
-        #     In_dict['comb_optptv'],  
-        #     In_dict['comb_oar_priority'],  
-        #     In_dict['comb_oar_distance'], 
-        #     In_dict['Body'], 
-        #     In_dict['mass_density'], 
-        #     In_dict['beam_plate_norm']), axis=0)
-
+        # Paper order: CT, PTV prescription, OAR priority, body, beam, distance.
         data_dict['data'] = torch.cat((
             In_dict['mass_density'], 
             In_dict['comb_optptv'],  
             In_dict['comb_oar_priority'],  
+            In_dict['Body'],
             In_dict['beam_plate_norm'],
-            In_dict['comb_oar_distance'], 
-            In_dict['Body']), axis=0)
+            In_dict['comb_oar_distance']), axis=0)
 
         data_dict['Body'] = In_dict['Body']
 
@@ -172,7 +165,7 @@ class GetLoader(object):
         return DataLoader(dataset_3d, **kwargs)
     
     def val_dataloader(self):
-        dataset_3d = MyDataset(self.cfig, phase='valid', dev_split = 'test') 
+        dataset_3d = MyDataset(self.cfig, phase='train', dev_split='valid')
         
         kwargs = {
             'batch_size': self.cfig['val_bs'],
@@ -188,7 +181,7 @@ class GetLoader(object):
         return DataLoader(dataset_3d, **kwargs)
     
     def test_dataloader(self):
-        dataset_3d = MyDataset(self.cfig, phase='test') 
+        dataset_3d = MyDataset(self.cfig, phase='valid', dev_split='test')
         
         kwargs = {
             'batch_size': self.cfig['val_bs'],
@@ -207,7 +200,7 @@ class GetLoader(object):
 
 if __name__ == '__main__':
 
-    cfig_path = 'config_files\config_DinoUnetr.yaml'
+    cfig_path = 'config_files/config_train.yaml'
 
     cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)
 

@@ -13,14 +13,9 @@ Lung_OAR_LIST = ["PTV_Ring.3-2", "Total Lung-GTV", "SpinalCord", "Heart", "LAD",
 Lung_OAR_DICT = {Lung_OAR_LIST[i]: (i+10) for i in range(len(Lung_OAR_LIST))}
 
 
-from monai.transforms import (
-    Compose,
-    Resized,
-    RandFlipd, 
-    RandRotated,
-    RandSpatialCropd,
-    CenterSpatialCropd
-)
+from monai.transforms import Compose, Resized
+
+from dino_unetr.dosedino import INPUT_CHANNELS
 
 class ProcessedSliceDataset(Dataset):
     """Load preprocessed 2D slice NPZ files."""
@@ -30,7 +25,7 @@ class ProcessedSliceDataset(Dataset):
         self.cfig = cfig
         
         search_path = os.path.join(data_root, "*.npz")
-        self.file_list = glob.glob(search_path)
+        self.file_list = sorted(glob.glob(search_path))
         
         if len(self.file_list) == 0:
             raise ValueError(f"No .npz files found in {data_root}. Please check the path.")
@@ -45,35 +40,14 @@ class ProcessedSliceDataset(Dataset):
         self.keys = ['data', 'label', 'body', 'ptv', 'oar_serial', 'oar_parallel']
         self.modes = ['bilinear', 'bilinear', 'nearest', 'nearest', 'nearest', 'nearest']
 
-        self.train_transforms = Compose([
-            RandSpatialCropd(
-                keys=self.keys, 
-                roi_size=[int(self.target_h * 0.9), int(self.target_w * 0.9)], 
-                max_roi_size=[int(self.target_h * 1.1), int(self.target_w * 1.1)], 
-                random_center=True, 
-                random_size=True, 
-                allow_missing_keys=True
-            ),
-            RandRotated(
-                keys=self.keys, 
-                prob=0.5, 
-                range_x=0.2, 
-                mode=self.modes, 
-                padding_mode='zeros', 
-                allow_missing_keys=True
-            ),
-            RandFlipd(keys=self.keys, prob=0.3, spatial_axis=0, allow_missing_keys=True),
-            RandFlipd(keys=self.keys, prob=0.3, spatial_axis=1, allow_missing_keys=True),
+        # The reported experiments use deterministic in-plane resizing only.
+        self.transforms = Compose([
             Resized(
-                keys=self.keys, 
-                spatial_size=self.target_size, 
-                mode=self.modes, 
-                allow_missing_keys=True
+                keys=self.keys,
+                spatial_size=self.target_size,
+                mode=self.modes,
+                allow_missing_keys=True,
             )
-        ])
-        
-        self.val_transforms = Compose([
-             Resized(keys=self.keys, spatial_size=self.target_size, mode=self.modes, allow_missing_keys=True)
         ])
 
 
@@ -87,6 +61,11 @@ class ProcessedSliceDataset(Dataset):
             npz = np.load(file_path, allow_pickle=True)
             
             data = npz['data']
+            if data.shape[0] != len(INPUT_CHANNELS):
+                raise ValueError(
+                    f"Expected {len(INPUT_CHANNELS)} channels in order {INPUT_CHANNELS}, "
+                    f"but found shape {data.shape}. Regenerate slices with run_process.py."
+                )
             label = npz['label']
             body = npz['body']            
             
@@ -142,10 +121,7 @@ class ProcessedSliceDataset(Dataset):
                 'oar_parallel': oar_parallel
             }
             
-            if self.phase == 'train':
-                data_dict = self.train_transforms(data_dict)
-            else:
-                data_dict = self.val_transforms(data_dict)
+            data_dict = self.transforms(data_dict)
             
             data_dict['isocenter'] = isocenter
             data_dict['spacing'] = spacing
@@ -162,9 +138,9 @@ class GetLoader(object):
         super().__init__()
         self.cfig = cfig
         
-        self.train_root = 'Dataset_256_layout_changechannel_nah&lung/Train'
-        self.valid_root = 'Dataset_256_layout_changechannel_nah&lung/Valid'
-        self.test_root = 'Dataset_256_layout_changechannel_nah&lung/Test'
+        self.train_root = cfig.get('train_root', 'Dataset_256_DoseDINO/Train')
+        self.valid_root = cfig.get('valid_root', 'Dataset_256_DoseDINO/Valid')
+        self.test_root = cfig.get('test_root', 'Dataset_256_DoseDINO/Test')
         
     def train_dataloader(self):
         dataset = ProcessedSliceDataset(data_root=self.train_root, cfig=self.cfig, phase='train')
@@ -222,7 +198,7 @@ class GetLoader(object):
 
 
 if __name__ == '__main__':
-    cfig_path = 'config_files/config_DinoUnetr.yaml'
+    cfig_path = 'config_files/config_train.yaml'
     
     if os.path.exists(cfig_path):
         cfig = yaml.load(open(cfig_path, encoding='utf-8'), Loader=yaml.FullLoader)

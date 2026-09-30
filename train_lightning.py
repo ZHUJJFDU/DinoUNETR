@@ -215,7 +215,7 @@ if __name__ == "__main__":
 
     loaders = data_loader_lightning_slice.GetLoader(cfig=cfig['loader_params'])
     train_loader = loaders.train_dataloader()
-    val_loader = loaders.test_dataloader()
+    val_loader = loaders.val_dataloader()
 
     model = GDPLightningModel(cfig)
 
